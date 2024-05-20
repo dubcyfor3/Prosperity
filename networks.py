@@ -3,45 +3,48 @@ from collections import OrderedDict
 import pickle
 import torch
 
-dim = 384
-batch_size = 1
-time_steps = 4
-depth = 4
-num_head = 12
-mlp_ratio = 4
-spikformer_SPS = OrderedDict([
-    ('conv2d_1', [32, dim // 8, dim // 4, 3, 1, 1, batch_size, time_steps]),
-    ('lif_1', [32 * 32 * dim // 4, batch_size, time_steps]),
-    ('conv2d_2', [32, dim // 4, dim // 2, 3, 1, 1, batch_size, time_steps]),
-    ('lif_2', [32 * 32 * dim // 2, batch_size, time_steps]),
-    ('maxpool2d_2', [32, dim // 2, 3, 1, 2, batch_size, time_steps]),
-    ('conv2d_3', [16, dim // 2, dim, 3, 1, 1, batch_size, time_steps]),
-    ('lif_3', [16 * 16 * dim, batch_size, time_steps]),
-    ('maxpool2d_3', [16, dim, 3, 1, 2, batch_size, time_steps]),
-    ('conv2d_rpe', [8, dim, dim, 3, 1, 1, batch_size, time_steps]),
-    ('lif_rpe', [8 * 8 * dim, batch_size, time_steps]),
-])
-spikformer_encoder = OrderedDict([
-    ('fc_q', [dim, dim, 64, batch_size, time_steps]),
-    ('lif_q', [dim * 64, batch_size, time_steps]),
-    ('fc_k', [dim, dim, 64, batch_size, time_steps]),
-    ('lif_k', [dim * 64, batch_size, time_steps]),
-    ('fc_v', [dim, dim, 64, batch_size, time_steps]),
-    ('lif_v', [dim * 64, batch_size, time_steps]),
-    ('attention', [dim, 64, num_head, batch_size, time_steps]),
-    ('lif_attn', [dim * 64, batch_size, time_steps]),
-    ('fc_o', [dim, dim, 64, batch_size, time_steps]),
-    ('lif_o', [dim * 64, batch_size, time_steps]),
-    ('fc_1', [dim, dim * mlp_ratio, 64, batch_size, time_steps]),
-    ('lif_1', [dim * mlp_ratio * 64, batch_size, time_steps]),
-    ('fc_2', [dim * mlp_ratio, dim, 64, batch_size, time_steps]),
-    ('lif_2', [dim * 64, batch_size, time_steps]),
-])
+def spikformer_config():
+    dim = 384
+    batch_size = 1
+    time_steps = 4
+    depth = 4
+    num_head = 12
+    mlp_ratio = 4
+    spikformer_SPS = OrderedDict([
+        ('conv2d_1', [32, dim // 8, dim // 4, 3, 1, 1, batch_size, time_steps]),
+        ('lif_1', [32 * 32 * dim // 4, batch_size, time_steps]),
+        ('conv2d_2', [32, dim // 4, dim // 2, 3, 1, 1, batch_size, time_steps]),
+        ('lif_2', [32 * 32 * dim // 2, batch_size, time_steps]),
+        ('maxpool2d_2', [32, dim // 2, 3, 1, 2, batch_size, time_steps]),
+        ('conv2d_3', [16, dim // 2, dim, 3, 1, 1, batch_size, time_steps]),
+        ('lif_3', [16 * 16 * dim, batch_size, time_steps]),
+        ('maxpool2d_3', [16, dim, 3, 1, 2, batch_size, time_steps]),
+        ('conv2d_rpe', [8, dim, dim, 3, 1, 1, batch_size, time_steps]),
+        ('lif_rpe', [8 * 8 * dim, batch_size, time_steps]),
+    ])
+    spikformer_encoder = OrderedDict([
+        ('fc_q', [dim, dim, 64, batch_size, time_steps]),
+        ('lif_q', [dim * 64, batch_size, time_steps]),
+        ('fc_k', [dim, dim, 64, batch_size, time_steps]),
+        ('lif_k', [dim * 64, batch_size, time_steps]),
+        ('fc_v', [dim, dim, 64, batch_size, time_steps]),
+        ('lif_v', [dim * 64, batch_size, time_steps]),
+        ('attention', [dim, 64, num_head, batch_size, time_steps]),
+        ('lif_attn', [dim * 64, batch_size, time_steps]),
+        ('fc_o', [dim, dim, 64, batch_size, time_steps]),
+        ('lif_o', [dim * 64, batch_size, time_steps]),
+        ('fc_1', [dim, dim * mlp_ratio, 64, batch_size, time_steps]),
+        ('lif_1', [dim * mlp_ratio * 64, batch_size, time_steps]),
+        ('fc_2', [dim * mlp_ratio, dim, 64, batch_size, time_steps]),
+        ('lif_2', [dim * 64, batch_size, time_steps]),
+    ])
 
-spikformer = OrderedDict([(key + '_sps', value) for key, value in spikformer_SPS.items()])
-for i in range(depth):
-    encoder_with_idx = OrderedDict([(key + '_enc_' + str(i), value) for key, value in spikformer_encoder.items()])
-    spikformer.update(encoder_with_idx)
+    spikformer = OrderedDict([(key + '_sps', value) for key, value in spikformer_SPS.items()])
+    for i in range(depth):
+        encoder_with_idx = OrderedDict([(key + '_enc_' + str(i), value) for key, value in spikformer_encoder.items()])
+        spikformer.update(encoder_with_idx)
+
+    return spikformer
 
 class Tensor:
     def __init__(self, shape, dtype, sparse=False):
@@ -117,7 +120,7 @@ class Attention:
 
 def create_network(name, spike_info):
     if name == 'spikformer':
-        config = spikformer
+        config = spikformer_config()
         ops = []
         for key, value in config.items():
             if key.startswith('conv2d'):
