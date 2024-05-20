@@ -189,43 +189,44 @@ class Simulator:
         input_shape = operator.activation_tensor.shape
         input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
         input_tensor = operator.activation_tensor.sparse_map.reshape(input_shape)
+        # a torch tensor, dtype = bool
         tile_size_M = 256
         tile_size_K = 16
-        nnz_list = []
         total_nnzs = torch.sum(input_tensor != 0).item()
         reduced_nnz = total_nnzs
         for m in range(0, input_shape[0], tile_size_M):
             for k in range(0, input_shape[1], tile_size_K):
                 cur_tile_size_M = min(tile_size_M, input_shape[0] - m)
                 cur_tile_size_K = min(tile_size_K, input_shape[1] - k)
-                subset_dict = {}
                 cur_tensor = input_tensor[m:m+cur_tile_size_M, k:k+cur_tile_size_K]
                 for i in range(cur_tile_size_M):
+                    # find the largest subset of each row
                     cur_row = cur_tensor[i]
                     nnz = torch.sum(cur_row != 0).item()
-                    # nnz_list.append(nnz)
                     if nnz < 2:
                         continue
-                    for j in range(cur_tile_size_M):
-                        if i == j or torch.sum(cur_tensor[j] != 0).item() < 2 or (torch.equal(cur_tensor[j], cur_row) and i < j):
-                            continue
-                        # if (torch.sum(cur_tensor[j] != 0).item() < 2):
-                        #     continue
-                        and_result = torch.logical_and(cur_row, cur_tensor[j])
-                        is_subset = torch.equal(and_result, cur_tensor[j]) # j is subset of i
-                        # if torch.equal(cur_tensor[j], cur_row) and i < j:
-                        #     continue
-                        # check if i exist in subset_dict
-                        if is_subset:
-                            j_nnz = torch.sum(cur_tensor[j] != 0).item()
-                            if i in subset_dict:
-                                prev_j, prev_nnz = subset_dict[i]
-                                if j_nnz > prev_nnz:
-                                    subset_dict[i] = (j, j_nnz)
-                            else:
-                                subset_dict[i] = (j, j_nnz)
-                for key, value in subset_dict.items():
-                    reduced_nnz -= value[1] - 1
+                    # if A is subset of B, then A & B = A
+                    and_result = torch.logical_and(cur_row, cur_tensor)
+                    equalities = torch.eq(and_result, cur_tensor)
+                    is_subset = torch.all(equalities, dim=-1)
+
+                    equalities = torch.eq(cur_row, cur_tensor)
+                    is_equal = torch.all(equalities, dim=-1)
+
+                    is_bigger_index = torch.arange(cur_tile_size_M) >= i
+
+                    # if A = B, then only reuse once
+                    is_excluded = torch.logical_and(is_equal, is_bigger_index)
+                    is_real_subset = torch.logical_and(is_subset, ~is_excluded)
+                    if torch.sum(is_real_subset) == 0:
+                        continue
+                    subset_row = cur_tensor[is_real_subset]
+                    subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
+                    max_subset = torch.max(subset_row_nnz).item()
+
+                    # if exist subset and the size is larger than 1, it can be reused, but reuse value still need one computation
+                    if max_subset > 1:
+                        reduced_nnz -= max_subset - 1
         print("preprocessed nnz: ", reduced_nnz)
         print("total nnz: ", total_nnzs)
         print("percentage: ", reduced_nnz / total_nnzs)
@@ -239,7 +240,7 @@ if __name__ == '__main__':
     # sim.run_simulation()
     # operator = nn[10]
     # sim.find_common_sequence(operator)
-    # nn = nn[10:]
+    nn = nn[10:]
     pre_nnzs = []
     total_nnzs = []
     for operator in nn:
@@ -260,7 +261,11 @@ if __name__ == '__main__':
 
     # fc = nn[10]
     # # create a torch tensor, that is a upper triangular matrix
-    # b = torch.rand(100, 100)
+    # b = torch.rand(10, 10)
+    # # uppder triangular
+    # b = torch.triu(b, diagonal=1)
+    # # cut half of the row
+    # b = b[:5]
     # # b = torch.eye(100)
     # b = b.to(torch.bool)
 
