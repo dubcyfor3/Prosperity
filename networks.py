@@ -2,6 +2,7 @@ import logging
 from collections import OrderedDict
 import pickle
 import torch
+from utils import img2col, get_density
 
 def spikformer_config():
     dim = 384
@@ -46,6 +47,26 @@ def spikformer_config():
 
     return spikformer
 
+
+def compute_num_OPS(nn):
+    total_ops = 0
+    for op in nn:
+        if isinstance(op, FC):
+            M = op.batch_size * op.time_steps * op.sequence_length
+            K = op.input_dim
+            N = op.output_dim
+            density = get_density(op.activation_tensor.sparse_map)
+            total_ops += int(M * K * N * density)
+        elif isinstance(op, Conv2D):
+            eq_op = conv2d_2_fc(op)
+            M = eq_op.batch_size * eq_op.time_steps * eq_op.sequence_length
+            K = eq_op.input_dim
+            N = eq_op.output_dim
+            density = get_density(eq_op.activation_tensor.sparse_map)
+            total_ops += int(M * K * N * density)
+    
+    return total_ops
+
 class Tensor:
     def __init__(self, shape, dtype, sparse=False):
         self.is_activation = True
@@ -54,6 +75,9 @@ class Tensor:
         self.dtype = dtype
         self.nbits = 8 if dtype == 'fp8' else 1
         self.sparse_map = None
+
+    def get_size(self):
+        return torch.tensor(self.shape).prod().item() * self.nbits
 
 class FC:
     def __init__(self, name, input_dim, output_dim, sequence_length, batch_size, time_steps):
@@ -102,6 +126,7 @@ class LIFNeuron:
         self.batch_size = batch_size
         self.time_steps = time_steps
         self.activation_tensor = Tensor([batch_size, time_steps, num_neuron], 'fp8', sparse=False)
+        self.membrane_potential = Tensor([batch_size, time_steps, num_neuron], 'fp8', sparse=False)
         self.output_tensor = Tensor([batch_size, time_steps, num_neuron], 'spike', sparse=True)
 
 class Attention:
@@ -117,6 +142,15 @@ class Attention:
         self.act_v_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
         self.attn_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, sequence_length], 'fp8', sparse=True)
         self.output_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'fp8', sparse=False)
+
+def conv2d_2_fc(operator: Conv2D) -> FC:
+    eq_input_dim  = operator.kernel_size * operator.kernel_size * operator.input_channel
+    eq_sequence_length = operator.output_H * operator.output_H
+    eq_output_dim = operator.output_channel
+    eq_sparse_map = img2col(operator.activation_tensor.sparse_map, operator.kernel_size, operator.stride, operator.padding)
+    eq_fc = FC(operator.name + '_2fc', eq_input_dim, eq_output_dim, eq_sequence_length, operator.batch_size, operator.time_steps)
+    eq_fc.activation_tensor.sparse_map = eq_sparse_map
+    return eq_fc
 
 def create_network(name, spike_info):
     if name == 'spikformer':
@@ -146,10 +180,31 @@ def create_network(name, spike_info):
     else:
         raise ValueError('Unknown network name')
     
-
+def print_sparsity(spike_info):
+    with open(spike_info, 'rb') as f:
+        sparse_act = pickle.load(f)
+        for key, value in sparse_act.items():
+            logging.info(f'{key}: {get_density(value[0]):.4f}')
     
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
+    # ops = create_network('spikformer', 'test.pkl')
+    # total_ops = compute_num_OPS(ops)
+    # num_adder = 512
+    # frequency = 500 * 1024 * 1024
+    # accelerator_ops = num_adder * frequency
+    # accelerator_time = total_ops / accelerator_ops
+    # logging.info(f'Total number of operations: {total_ops}')
+    # logging.info(f'Accelerator time: {accelerator_time} s')
+    print_sparsity('test.pkl')
     ops = create_network('spikformer', 'test.pkl')
-    for op in ops:
-        logging.info(op.__dict__)
+    q = ops[16].act_q_tensor.sparse_map
+    k = ops[16].act_k_tensor.sparse_map
+    v = ops[16].act_v_tensor.sparse_map
+    q = q.reshape(q.shape[0], q.shape[1], q.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
+    k = k.reshape(k.shape[0], k.shape[1], k.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
+    v = v.reshape(v.shape[0], v.shape[1], v.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
+    attn = q @ k.transpose(-2, -1)
+    attn
+
+
