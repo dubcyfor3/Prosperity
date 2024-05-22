@@ -25,7 +25,6 @@ class Accelerator:
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
         self.sram_size['act'] = sram_size['act'] # global buffer
         self.sram_size['psum'] = sram_size['psum'] # global buffer
-        self.sram_size['out'] = sram_size['out']
         self.adder_array_size = 128
         self.LIF_array_size = 32
         self.mem_if_width = mem_if_width
@@ -48,7 +47,7 @@ class Simulator:
                 pass
 
         total_stats = Stats()
-        last_stats_key, last_stats = stats[0]
+        last_stats_key, last_stats = next(iter(stats.items()))
         for key, value in stats.items():
             # lif can be overlapped with fc and conv
             if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv')):
@@ -59,6 +58,7 @@ class Simulator:
                     total_stats.total_cycles += value.total_cycles - last_stats_cycles
             else:
                 total_stats.total_cycles += value.total_cycles
+            last_stats_key, last_stats = key, value
         
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1024 * 1024))
@@ -321,6 +321,8 @@ class Simulator:
             stats.writes['g_act'] = operator.output_tensor.get_size()
         else:
             stats.writes['dram'] = operator.output_tensor.get_size()
+            stats.total_cycles += operator.output_tensor.get_size() // self.accelerator.mem_if_width
+        return stats
     
     def find_reuse(self, act: torch.Tensor):
         cycles = 0
@@ -413,26 +415,26 @@ if __name__ == '__main__':
     accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_width=8)
     nn = create_network('spikformer', 'test.pkl')
     sim = Simulator(accelerator, nn)
-    # sim.run_simulation()
+    sim.run_simulation()
     # operator = nn[10]
     # sim.find_common_sequence(operator)
-    pre_nnzs = []
-    total_nnzs = []
-    for operator in nn:
-        if isinstance(operator, Conv2D):
-            eq_fc = conv2d_2_fc(operator)
-            print(eq_fc.name)
-            pre_nnz, total_nnz = sim.find_largest_subset(eq_fc)
-        if isinstance(operator, FC):
-            print(operator.name)
-            pre_nnz, total_nnz = sim.find_largest_subset(operator)
+    # pre_nnzs = []
+    # total_nnzs = []
+    # for operator in nn:
+    #     if isinstance(operator, Conv2D):
+    #         eq_fc = conv2d_2_fc(operator)
+    #         print(eq_fc.name)
+    #         pre_nnz, total_nnz = sim.find_largest_subset(eq_fc)
+    #     if isinstance(operator, FC):
+    #         print(operator.name)
+    #         pre_nnz, total_nnz = sim.find_largest_subset(operator)
 
-        pre_nnzs.append(pre_nnz)
-        total_nnzs.append(total_nnz)
+    #     pre_nnzs.append(pre_nnz)
+    #     total_nnzs.append(total_nnz)
     
-    print("preprocessed nnzs: ", sum(pre_nnzs))
-    print("total nnzs: ", sum(total_nnzs))
-    print("percentage: ", sum(pre_nnzs) / sum(total_nnzs))
+    # print("preprocessed nnzs: ", sum(pre_nnzs))
+    # print("total nnzs: ", sum(total_nnzs))
+    # print("percentage: ", sum(pre_nnzs) / sum(total_nnzs))
 
     # fc = nn[10]
     # # create a torch tensor, that is a upper triangular matrix
