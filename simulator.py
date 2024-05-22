@@ -63,7 +63,7 @@ class Simulator:
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1024 * 1024))
     
-    def run_fc_new(self, operator: FC):
+    def run_fc(self, operator: FC):
         stats = Stats()
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
         # reshape activation tensor
@@ -169,131 +169,6 @@ class Simulator:
 
         return stats
                     
-                    
-    def run_fc(self, operator: FC):
-        stats_list = [Stats() for _ in range(self.accelerator.num_PE)]
-        total_stats = Stats()
-        assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
-        # reshape activation tensor
-        input_shape = operator.activation_tensor.shape
-        input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
-        input_tensor = operator.activation_tensor.sparse_map.reshape(input_shape)
-
-        M, K, N = input_shape[0], input_shape[1], operator.weight_tensor.shape[1]
-        tile_size_M = 64
-        tile_size_K = 128 # dense format 128 bit, sparse format 7 bit * num_nonzero
-        tile_size_N = 8 # 8 bits per element, 64 bit in a line
-        tile_num_M = ceil_a_by_b(M, tile_size_M)
-        tile_num_K = ceil_a_by_b(K, tile_size_K)
-        tile_num_N = ceil_a_by_b(N, tile_size_N)
-        cur_M_idx = 0
-
-        # store as CSR format
-        input_size = torch.sum(input_tensor != 0).item() * int(np.log2(input_shape[1])) + input_shape[0] * int(np.log2(input_shape[0]))
-        input_tile_size_avg = input_size // (tile_num_M * tile_num_K)
-        weight_tile_size = tile_size_K * tile_size_N * operator.weight_tensor.nbits
-
-        buffer_state_act = None
-        if input_tile_size_avg * (tile_num_M * tile_num_K) < self.accelerator.sram_size['act']:
-            buffer_state_act = "store all"
-        elif input_tile_size_avg * tile_num_K < self.accelerator.sram_size['act']:
-            buffer_state_act = "store row"
-        elif input_tile_size_avg < self.accelerator.sram_size['act']:
-            buffer_state_act = "store single tile"
-        else:
-            raise Exception("single tile cannot fit in sram act buffer")
-        
-        buffer_state_wgt = None
-        if weight_tile_size * (tile_num_K * tile_num_N) < self.accelerator.sram_size['wgt']:
-            buffer_state_wgt = "store all"
-        elif weight_tile_size * tile_num_K < self.accelerator.sram_size['wgt']:
-            buffer_state_wgt = "store col"
-        elif weight_tile_size < self.accelerator.sram_size['wgt']:
-            buffer_state_wgt = "store single tile"
-        else:
-            raise Exception("single tile cannot fit in sram wgt buffer")
-
-        # init dram read that cannot overlap with compute
-        init_dram_read_act = input_tile_size_avg * min(self.accelerator.num_PE, tile_num_K)
-        init_dram_read_wgt = weight_tile_size * min(self.accelerator.num_PE, tile_num_K * tile_num_N)
-
-
-        PE_idx = 0
-        for m in range(tile_num_M):
-            cur_tile_size_M = min(tile_size_M, M - cur_M_idx)
-            cur_M_idx += cur_tile_size_M
-            cur_N_idx = 0
-            for n in range(tile_num_N):
-                cur_tile_size_N = min(tile_size_N, N - cur_N_idx)
-                cur_N_idx += cur_tile_size_N
-                cur_K_idx = 0
-                for k in range(tile_num_K):
-                    cur_tile_size_K = min(tile_size_K, K - cur_K_idx)
-                    cur_K_idx += cur_tile_size_K
-
-                    stats = stats_list[PE_idx]
-                    PE_idx = (PE_idx + 1) % self.accelerator.num_PE
-
-                    cur_act = input_tensor[cur_M_idx - cur_tile_size_M:cur_M_idx, cur_K_idx - cur_tile_size_K:cur_K_idx]
-                    cur_nnz = torch.sum(cur_act != 0).item()
-                    if buffer_state_act == "store single tile":
-                        stats.reads['dram'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                        stats.writes['g_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                    elif buffer_state_act == "store row" and n == 0:
-                        stats.reads['dram'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                        stats.writes['g_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                    elif buffer_state_act == "store all" and n == 0:
-                        stats.reads['dram'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                        stats.writes['g_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                    
-                    if buffer_state_wgt == "store single tile":
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    elif buffer_state_wgt == "store col":
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    elif buffer_state_wgt == "store all" and m == 0:
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    
-                    stats.reads['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    stats.writes['l_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    # read activation in sparse format
-                    stats.reads['g_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                    stats.writes['l_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-                    stats.reads['l_act'] += cur_nnz * int(np.log2(cur_tile_size_K)) + cur_tile_size_M * int(np.log2(cur_tile_size_M))
-
-                    # assume idx % self.accelerator.adder_width == 0 has same bank
-                    # assert cur_tile_size_K % self.accelerator.adder_width == 0
-                    if cur_tile_size_K % self.accelerator.adder_width != 0:
-                        # pad zeros to make sure cur_tile_size_K % self.accelerator.adder_width == 0
-                        pad_size = self.accelerator.adder_width - cur_tile_size_K % self.accelerator.adder_width
-                        cur_act = torch.cat([cur_act, torch.zeros(cur_tile_size_M, pad_size)], dim=-1)
-                    cur_act = cur_act.reshape((cur_tile_size_M, cur_tile_size_K // self.accelerator.adder_width, self.accelerator.adder_width))
-                    num_spike_per_bank = torch.sum(cur_act, dim=-2)
-                    max_spike_per_bank = torch.max(num_spike_per_bank, dim=-1)[0]
-                    adder_tree_cycles = torch.sum(max_spike_per_bank) + int(np.log2(self.accelerator.adder_width)) # assume adder tree is pipelined
-
-                    stats.reads['l_wgt'] += cur_nnz * cur_tile_size_N * operator.weight_tensor.nbits
-                    stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
-
-                    if k == tile_num_K - 1:
-                        stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
-                        stats.writes['dram'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
-
-                    stats.compute_cycles += adder_tree_cycles.item()
-
-        init_dram_access = init_dram_read_act + init_dram_read_wgt
-        total_dram_access = sum([stats.reads['dram'] for stats in stats_list]) + sum([stats.writes['dram'] for stats in stats_list])
-        middle_dram_access = total_dram_access - init_dram_access
-        init_mem_cycles = (init_dram_access) // self.accelerator.mem_if_width
-        middle_mem_cycles = (middle_dram_access) // self.accelerator.mem_if_width
-        total_stats.compute_cycles = max([stats.compute_cycles for stats in stats_list])
-        total_stats.mem_stall_cycles = init_mem_cycles + max(0, middle_mem_cycles - total_stats.compute_cycles)
-        total_stats.total_cycles = total_stats.compute_cycles + total_stats.mem_stall_cycles
-        
-
-        return stats_list, total_stats
     
     def run_conv2d(self, operator: Conv2D):
         # eq_input_dim  = operator.kernel_size * operator.kernel_size * operator.input_channel
@@ -303,7 +178,7 @@ class Simulator:
         # eq_fc = FC(operator.name + '_2fc', eq_input_dim, eq_output_dim, eq_sequence_length, operator.batch_size, operator.time_steps)
         # eq_fc.activation_tensor.sparse_map = eq_sparse_map
         eq_fc = conv2d_2_fc(operator)
-        return self.run_fc_new(eq_fc)
+        return self.run_fc(eq_fc)
     
     def run_LIF(self, operator: LIFNeuron):
         stats = Stats()
