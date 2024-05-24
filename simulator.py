@@ -19,14 +19,16 @@ class Stats:
 
 
 class Accelerator:
-    def __init__(self, num_PE, sram_size, adder_width, mem_if_width=1024):
+    def __init__(self, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
         self.num_PE = num_PE
         self.sram_size = {}
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
         self.sram_size['act'] = sram_size['act'] # global buffer
         self.sram_size['psum'] = sram_size['psum'] # global buffer
-        self.adder_array_size = 128
-        self.LIF_array_size = 32
+        self.adder_array_size = adder_array_size
+        self.LIF_array_size = LIF_array_size
+        self.bit_operation_width = 32
+        self.bo_array_size = 32
         self.mem_if_width = mem_if_width
 
 class Simulator:
@@ -36,13 +38,16 @@ class Simulator:
     
     def run_simulation(self):
         stats = OrderedDict()
+        spike_stored_in_buffer = False
         for operator in self.network:
             if isinstance(operator, FC):
-                stats[operator.name] = self.run_fc_new(operator)
+                stats[operator.name] = self.run_fc(operator, spike_stored_in_buffer)
             elif isinstance(operator, Conv2D):
-                stats[operator.name] = self.run_conv2d(operator)
+                stats[operator.name] = self.run_conv2d(operator, spike_stored_in_buffer)
             elif isinstance(operator, LIFNeuron):
-                stats[operator.name] = self.run_LIF(operator)
+                stats[operator.name], spike_stored_in_buffer = self.run_LIF(operator)
+            elif isinstance(operator, Attention):
+                stats[operator.name] = self.run_attention(operator, spike_stored_in_buffer)
             else:
                 pass
 
@@ -50,10 +55,10 @@ class Simulator:
         last_stats_key, last_stats = next(iter(stats.items()))
         for key, value in stats.items():
             # lif can be overlapped with fc and conv
-            if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv')):
+            if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('attention')):
                 last_stats_cycles = last_stats.total_cycles
-                if last_stats_cycles + value.latency >= value.total_cycles:
-                    total_stats.total_cycles += value.latency
+                if last_stats_cycles + value.LIF_latency >= value.total_cycles:
+                    total_stats.total_cycles += value.LIF_latency
                 else:
                     total_stats.total_cycles += value.total_cycles - last_stats_cycles
             else:
@@ -63,7 +68,7 @@ class Simulator:
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1024 * 1024))
     
-    def run_fc(self, operator: FC):
+    def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
         stats = Stats()
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
         # reshape activation tensor
@@ -114,25 +119,26 @@ class Simulator:
                     cur_tile_size_N = min(tile_size_N, N - n * tile_size_N)
                     cur_act = input_tensor[m * tile_size_M: m * tile_size_M + cur_tile_size_M, k * tile_size_K: k * tile_size_K + cur_tile_size_K]
 
-                    if buffer_state_act == "store single tile":
-                        stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
-                        stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
-                    elif buffer_state_act == "store row" and n == 0:
-                        stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
-                        stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
-                    elif buffer_state_act == "store all" and n == 0:
-                        stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
-                        stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
-
-                    if buffer_state_wgt == "store single tile":
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    elif buffer_state_wgt == "store col":
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    elif buffer_state_wgt == "store all" and m == 0:
-                        stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                        stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                    if not spike_stored_in_buffer:
+                        if buffer_state_act == "store single tile":
+                            stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        elif buffer_state_act == "store row" and n == 0:
+                            stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        elif buffer_state_act == "store all" and n == 0:
+                            stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                    if not weight_stored_in_buffer:
+                        if buffer_state_wgt == "store single tile":
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                        elif buffer_state_wgt == "store col":
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                        elif buffer_state_wgt == "store all" and m == 0:
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
 
                     stats.reads['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
                     stats.writes['l_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
@@ -141,19 +147,26 @@ class Simulator:
                     
                     preprocess_act, cur_cycles = self.find_reuse(cur_act)
                     compute_cycles += torch.sum(preprocess_act != 0).item()
+                    # find the row in preprocess_act that is all zero
+                    nnz_each_row = torch.sum(preprocess_act != 0, dim=-1)
+                    all_zero_row = nnz_each_row == 0
+                    compute_cycles += torch.sum(all_zero_row).item()
+
                     preprocess_cycles += cur_cycles
                     orginial_compute_cycles += torch.sum(cur_act != 0).item()
                     stats.num_ops += torch.sum(preprocess_act != 0).item() * cur_tile_size_N
 
                     stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
                     stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
-                    if k == tile_num_K - 1:
-                        stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
-                        stats.writes['dram'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
+                    # if k == tile_num_K - 1:
+                    #     stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
+                    #     stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
 
-                        
-
-        init_mem_access = min(tile_size_K, K) * min(tile_size_M, M) + min(tile_size_K, K) * min(tile_size_N, N) * operator.weight_tensor.nbits # read the first tile from dram to buffer
+        init_mem_access = 0
+        if not weight_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_N, N) * operator.weight_tensor.nbits # read the first tile from dram to buffer
+        if not spike_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_M, M)
         total_mem_access = stats.reads['dram'] + stats.writes['dram']
         middle_mem_access = total_mem_access - init_mem_access
         init_latency = init_mem_access // self.accelerator.mem_if_width
@@ -170,18 +183,13 @@ class Simulator:
         return stats
                     
     
-    def run_conv2d(self, operator: Conv2D):
-        # eq_input_dim  = operator.kernel_size * operator.kernel_size * operator.input_channel
-        # eq_sequence_length = operator.output_H * operator.output_H
-        # eq_output_dim = operator.output_channel
-        # eq_sparse_map = img2col(operator.activation_tensor.sparse_map, operator.kernel_size, operator.stride, operator.padding)
-        # eq_fc = FC(operator.name + '_2fc', eq_input_dim, eq_output_dim, eq_sequence_length, operator.batch_size, operator.time_steps)
-        # eq_fc.activation_tensor.sparse_map = eq_sparse_map
+    def run_conv2d(self, operator: Conv2D, spike_stored_in_buffer=False):
         eq_fc = conv2d_2_fc(operator)
-        return self.run_fc(eq_fc)
+        return self.run_fc(eq_fc, spike_stored_in_buffer)
     
     def run_LIF(self, operator: LIFNeuron):
         stats = Stats()
+        spike_stored_in_buffer = False
         num_round = ceil_a_by_b(operator.num_neuron, self.accelerator.LIF_array_size)
         compute_cycles = num_round * operator.time_steps * 2 # one cycle for addition one cycle for mutiplication
         tile_size_M = 256
@@ -189,14 +197,70 @@ class Simulator:
         num_neuron_in_tile = tile_size_M * tile_size_N // operator.time_steps
         latency = ceil_a_by_b(num_neuron_in_tile, self.accelerator.LIF_array_size) * operator.time_steps * 2
         stats.compute_cycles = compute_cycles
-        stats.mem_stall_cycles = 0
         stats.LIF_latency = latency
-        stats.total_cycles = compute_cycles
         if operator.output_tensor.get_size() < self.accelerator.sram_size['act']:
             stats.writes['g_act'] = operator.output_tensor.get_size()
+            spike_stored_in_buffer = True
         else:
             stats.writes['dram'] = operator.output_tensor.get_size()
-            stats.total_cycles += operator.output_tensor.get_size() // self.accelerator.mem_if_width
+            mem_cycles = operator.output_tensor.get_size() // self.accelerator.mem_if_width
+            stats.mem_stall_cycles += max(0, mem_cycles - stats.compute_cycles)
+            # no extra memory latency since spike is generated in streaming manner, each time 32 bits
+        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+        print(operator.name)
+        print("compute cycles: ", compute_cycles)
+        print("latency: ", latency)
+        print("total cycles: ", stats.total_cycles)
+        return stats, spike_stored_in_buffer
+    
+    def run_attention(self, operator: Attention, spike_stored_in_buffer=False):
+        stats = Stats()
+
+        # change the q k v multiplication order according to matrix shape, reduce computation overhead
+        eq_sequence_length = max(operator.sequence_length, operator.dim_per_head)
+        eq_dim_per_head = min(operator.sequence_length, operator.dim_per_head)
+
+        init_mem_access = 0
+        if not spike_stored_in_buffer:
+            init_mem_access += eq_sequence_length * eq_dim_per_head * 3
+            stats.reads['dram'] += operator.act_q_tensor.sparse_map.numel() * 3
+        # compute k*v first
+        num_op_per_output = ceil_a_by_b(eq_sequence_length, self.accelerator.bit_operation_width)
+        num_output = eq_dim_per_head * eq_dim_per_head * operator.num_head * operator.batch_size * operator.time_steps
+        stats.compute_cycles += num_op_per_output * num_output
+        # then compute q * kv
+        act = operator.act_q_tensor.sparse_map
+        act = act.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+        # tile_size_M = 256
+        # tile_size_K = 16
+        for t in range(operator.time_steps):
+            for b in range(operator.batch_size):
+                for h in range(operator.num_head):
+                    cur_act = act[t, b, h, :, :]
+                    name = f"{operator.name}_t{t}_b{b}_h{h}"
+                    input_dim = eq_dim_per_head
+                    output_dim = eq_dim_per_head
+                    sequence_length = eq_sequence_length
+                    time_steps = 1
+                    batch_size = 1
+                    eq_fc = FC(name, input_dim, output_dim, sequence_length, time_steps, batch_size)
+                    eq_fc.activation_tensor.sparse_map = cur_act
+                    out_spike_stored_in_buffer = cur_act.numel() < self.accelerator.sram_size['act']
+                    out_weight_stored_in_buffer = eq_fc.weight_tensor.get_size() < self.accelerator.sram_size['wgt']
+                    if not out_spike_stored_in_buffer:
+                        stats.writes['dram'] += cur_act.numel()
+                    if not out_weight_stored_in_buffer:
+                        stats.writes['dram'] += eq_fc.weight_tensor.get_size()
+                    cur_stats = self.run_fc(eq_fc, out_spike_stored_in_buffer, out_weight_stored_in_buffer)
+                    stats.compute_cycles += cur_stats.total_cycles
+        
+        total_mem_access = stats.reads['dram'] + stats.writes['dram']
+        middle_mem_access = total_mem_access - init_mem_access
+        init_latency = init_mem_access // self.accelerator.mem_if_width
+        stats.mem_stall_cycles = init_latency + max(0, middle_mem_access // self.accelerator.mem_if_width - stats.compute_cycles)
+        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
         return stats
     
     def find_reuse(self, act: torch.Tensor):
@@ -221,19 +285,20 @@ class Simulator:
             is_real_subset = torch.logical_and(is_subset, ~is_excluded)
 
             cycles += 1 # find all subset of this row in CAM
+            cycles += 1 # mask the searched row in CAM
 
             if torch.sum(is_real_subset) == 0:
-                # cycles += 1 # has to search the next begin point in CAM
+                cycles += 1 # if no subset, search for next begin point in CAM
                 continue
             subset_row = act[is_real_subset]
             subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
             max_subset_size = torch.max(subset_row_nnz).item()
             max_subset = subset_row[torch.argmax(subset_row_nnz)]
-            cycles += 1 # popcnt to get the largest subset
+            # cycles += 1 popcnt is not in critical path
             if max_subset_size > 1:
                 preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
-            # else:
-                # cycles += 1 # has to search the next begin point in CAM
+            else:
+                cycles += 1 # do the popcnt and then has to search the next begin point in CAM
 
         return preprocessed_act, cycles
 
@@ -279,7 +344,10 @@ class Simulator:
 
                     # if exist subset and the size is larger than 1, it can be reused
                     if max_subset > 1:
-                        reduced_nnz -= max_subset
+                        if nnz == max_subset:
+                            reduced_nnz -= max_subset - 1
+                        else:
+                            reduced_nnz -= max_subset
         print("preprocessed nnz: ", reduced_nnz)
         print("total nnz: ", total_nnzs)
         print("percentage: ", reduced_nnz / total_nnzs)
@@ -287,11 +355,14 @@ class Simulator:
 
                     
 if __name__ == '__main__':
-    accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_width=8)
+    # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 32
+
+    accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
     nn = create_network('spikformer', 'test.pkl')
     sim = Simulator(accelerator, nn)
     sim.run_simulation()
-    # operator = nn[10]
+    # operator = nn[12]
+    # sim.run_attention(operator, spike_stored_in_buffer=False)
     # sim.find_common_sequence(operator)
     # pre_nnzs = []
     # total_nnzs = []
@@ -303,7 +374,8 @@ if __name__ == '__main__':
     #     if isinstance(operator, FC):
     #         print(operator.name)
     #         pre_nnz, total_nnz = sim.find_largest_subset(operator)
-
+    #     else:
+    #         continue
     #     pre_nnzs.append(pre_nnz)
     #     total_nnzs.append(total_nnz)
     
