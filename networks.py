@@ -24,12 +24,13 @@ def spikformer_config():
         ('lif_rpe', [8 * 8 * dim, batch_size, time_steps]),
     ])
     spikformer_encoder = OrderedDict([
-        ('fc_q', [dim, dim, 64, batch_size, time_steps]),
-        ('lif_q', [dim * 64, batch_size, time_steps]),
-        ('fc_k', [dim, dim, 64, batch_size, time_steps]),
-        ('lif_k', [dim * 64, batch_size, time_steps]),
-        ('fc_v', [dim, dim, 64, batch_size, time_steps]),
-        ('lif_v', [dim * 64, batch_size, time_steps]),
+        ('fc_q', [dim, dim * 3, 64, batch_size, time_steps]),
+        ('lif_q', [dim * 64 * 3, batch_size, time_steps]),
+        # qkv is fused
+        # ('fc_k', [dim, dim, 64, batch_size, time_steps]),
+        # ('lif_k', [dim * 64, batch_size, time_steps]),
+        # ('fc_v', [dim, dim, 64, batch_size, time_steps]),
+        # ('lif_v', [dim * 64, batch_size, time_steps]),
         ('attention', [dim, 64, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * 64, batch_size, time_steps]),
         ('fc_o', [dim, dim, 64, batch_size, time_steps]),
@@ -135,6 +136,7 @@ class Attention:
         self.dim = dim
         self.sequence_length = sequence_length
         self.num_head = num_head
+        self.dim_per_head = dim // num_head
         self.batch_size = batch_size
         self.time_steps = time_steps
         self.act_q_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
@@ -180,31 +182,38 @@ def create_network(name, spike_info):
     else:
         raise ValueError('Unknown network name')
     
-def print_sparsity(spike_info):
-    with open(spike_info, 'rb') as f:
-        sparse_act = pickle.load(f)
-        for key, value in sparse_act.items():
-            logging.info(f'{key}: {get_density(value[0]):.4f}')
-    
+def print_sparsity(network, spike_info):
+    if network == 'spikformer':
+        with open(spike_info, 'rb') as f:
+            sparse_act = pickle.load(f)
+            for key, value in sparse_act.items():
+                logging.info(f'{key}: {get_density(value):.4f}')
+    elif network == 'spikeBERT':
+        with open(spike_info, 'rb') as f:
+            sparse_act = pickle.load(f)
+            for key, value in sparse_act.items():
+                logging.info(f'{key}: {get_density(value):.4f}')
+    elif network == 'sdt':
+        with open(spike_info, 'rb') as f:
+            sparse_act = torch.load(f)
+            for key, value in sparse_act.items():
+                logging.info(f'{key}: {get_density(value):.4f}')
+
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     # ops = create_network('spikformer', 'test.pkl')
     # total_ops = compute_num_OPS(ops)
-    # num_adder = 512
+    # num_adder = 128
     # frequency = 500 * 1024 * 1024
     # accelerator_ops = num_adder * frequency
     # accelerator_time = total_ops / accelerator_ops
     # logging.info(f'Total number of operations: {total_ops}')
     # logging.info(f'Accelerator time: {accelerator_time} s')
-    print_sparsity('test.pkl')
-    ops = create_network('spikformer', 'test.pkl')
-    q = ops[16].act_q_tensor.sparse_map
-    k = ops[16].act_k_tensor.sparse_map
-    v = ops[16].act_v_tensor.sparse_map
-    q = q.reshape(q.shape[0], q.shape[1], q.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
-    k = k.reshape(k.shape[0], k.shape[1], k.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
-    v = v.reshape(v.shape[0], v.shape[1], v.shape[2], 12, -1).permute(0, 1, 3, 2, 4).contiguous()
-    attn = q @ k.transpose(-2, -1)
-    attn
+    print_sparsity('spikeBERT', 'spikebert_sst2_new.pkl')
+    # attention 32 * 64, 64 * 32, 12 32 * 32 * 2 * 12
+
+
+
+
 
 
