@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 import networkx as nx
 import numpy as np
+from utils import get_density
 
 def construct_subset_DAG(spike_tensor: torch.Tensor):
     shape = spike_tensor.shape
@@ -73,7 +74,8 @@ def visualize_dag(G, filename):
     plt.title("Directed Acyclic Graph (DAG) Visualization")
     plt.savefig('{}'.format(filename))
 
-if __name__ == '__main__':
+
+def idealistic_analysis():
     nn = create_network('spikformer', 'test.pkl')
     total_ori_nnz = 0
     total_rank_one_nnz = 0
@@ -115,3 +117,29 @@ if __name__ == '__main__':
     ideal_percentage = total_ideal_nnz / total_ori_nnz
     print("rank_one_percentage: ", rank_one_percentage, "ideal_percentage: ", ideal_percentage)
 
+
+def all_zero_analysis():
+    nn = create_network('spikformer', 'test.pkl')
+    attn = nn[42]
+    q = attn.act_q_tensor.sparse_map.reshape([attn.time_steps, attn.batch_size, attn.sequence_length, attn.num_head, attn.dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
+    k = attn.act_k_tensor.sparse_map.reshape([attn.time_steps, attn.batch_size, attn.sequence_length, attn.num_head, attn.dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
+    v = attn.act_v_tensor.sparse_map.reshape([attn.time_steps, attn.batch_size, attn.sequence_length, attn.num_head, attn.dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
+    # reshape last dimension into 2 * 32
+    q = q.reshape(q.shape[0], q.shape[1], q.shape[2], q.shape[3], 2, 32)
+    k = k.reshape(k.shape[0], k.shape[1], k.shape[2], k.shape[3], 2, 32)
+    v = v.reshape(v.shape[0], v.shape[1], v.shape[2], v.shape[3], 2, 32)
+    q_row_nnz = torch.sum(q, dim=-1).permute(0, 1, 2, 4, 3)
+    k_row_nnz = torch.sum(k, dim=-1).permute(0, 1, 2, 4, 3)
+    v_row_nnz = torch.sum(v, dim=-1).permute(0, 1, 2, 4, 3)
+    q_nonzero_row = torch.sum(q_row_nnz != 0, dim=-1)
+    k_nonzero_row = torch.sum(k_row_nnz != 0, dim=-1)
+    v_nonzero_row = torch.sum(v_row_nnz != 0, dim=-1)
+
+    additional_overhead = attn.time_steps * attn.batch_size * attn.num_head * attn.dim_per_head * 2
+    original_computation = attn.time_steps * attn.batch_size * attn.num_head * attn.dim_per_head * attn.dim_per_head * 2
+    reduced_computation = torch.sum(k_nonzero_row * v_nonzero_row).item()
+
+    print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
+    print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
+if __name__ == '__main__':
+    all_zero_analysis()
