@@ -4,7 +4,9 @@ import torch
 import numpy as np
 from collections import defaultdict
 from collections import OrderedDict
+import logging
 
+logging.basicConfig(level=logging.INFO)
 
 class Stats:
     def __init__(self):
@@ -17,6 +19,22 @@ class Stats:
         self.reads = {space: 0 for space in self.mem_namespace}
         self.writes = {space: 0 for space in self.mem_namespace}
 
+    def __add__(self, other):
+        if not isinstance(other, Stats):
+            raise Exception("unsupported type")
+        else:
+            added_stats = Stats()
+            added_stats.total_cycles = self.total_cycles # handle cycles manually
+            added_stats.mem_stall_cycles = self.mem_stall_cycles
+            added_stats.compute_cycles = self.compute_cycles
+            added_stats.num_ops = self.num_ops + other.num_ops
+            added_stats.LIF_latency = 0
+            added_stats.mem_namespace = self.mem_namespace
+            added_stats.reads = {space: self.reads[space] + other.reads[space] for space in self.mem_namespace}
+            added_stats.writes = {space: self.writes[space] + other.writes[space] for space in self.mem_namespace}
+            
+            return added_stats
+
 
 class Accelerator:
     def __init__(self, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
@@ -28,7 +46,7 @@ class Accelerator:
         self.adder_array_size = adder_array_size
         self.LIF_array_size = LIF_array_size
         self.bit_operation_width = 32
-        self.bo_array_size = 32
+        self.bo_array_size = 4
         self.mem_if_width = mem_if_width
 
 class Simulator:
@@ -48,12 +66,15 @@ class Simulator:
                 stats[operator.name], spike_stored_in_buffer = self.run_LIF(operator)
             elif isinstance(operator, Attention):
                 stats[operator.name] = self.run_attention(operator, spike_stored_in_buffer)
+            elif isinstance(operator, MaxPool2D):
+                stats[operator.name] = self.run_maxpool(operator)
             else:
-                pass
+                raise Exception("unsupported operator")
 
         total_stats = Stats()
         last_stats_key, last_stats = next(iter(stats.items()))
         for key, value in stats.items():
+            total_stats += value
             # lif can be overlapped with fc and conv
             if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('attention')):
                 last_stats_cycles = last_stats.total_cycles
@@ -64,9 +85,28 @@ class Simulator:
             else:
                 total_stats.total_cycles += value.total_cycles
             last_stats_key, last_stats = key, value
+
         
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1024 * 1024))
+        print("total ops: ", total_stats.num_ops)
+        print("mem access", total_stats.reads['dram'] + total_stats.writes['dram'])
+        print("buffer access", total_stats.reads['g_act'] + total_stats.writes['g_act'] + total_stats.reads['g_wgt'] + total_stats.writes['g_wgt'] + total_stats.reads['g_psum'] + total_stats.writes['g_psum'])
+
+        cycles_conv = 0
+        cycles_fc = 0
+        cycles_attn = 0
+        for key, value in stats.items():
+            if key.startswith('fc'):
+                cycles_fc += value.total_cycles
+            if key.startswith('conv'):
+                cycles_conv += value.total_cycles
+            if key.startswith('attention'):
+                cycles_attn += value.total_cycles
+
+        print("conv percentage: ", cycles_conv / total_stats.total_cycles)
+        print("fc percentage: ", cycles_fc / total_stats.total_cycles)
+        print("attn percentage: ", cycles_attn / total_stats.total_cycles)
     
     def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
         stats = Stats()
@@ -112,8 +152,8 @@ class Simulator:
 
 
         for m in range(tile_num_M):
-            for k in range(tile_num_K):
-                for n in range(tile_num_N):
+            for n in range(tile_num_N):
+                for k in range(tile_num_K):
                     cur_tile_size_M = min(tile_size_M, M - m * tile_size_M)
                     cur_tile_size_K = min(tile_size_K, K - k * tile_size_K)
                     cur_tile_size_N = min(tile_size_N, N - n * tile_size_N)
@@ -147,15 +187,20 @@ class Simulator:
                     
                     preprocess_act, cur_cycles = self.find_reuse(cur_act)
                     compute_cycles += torch.sum(preprocess_act != 0).item()
-                    # find the row in preprocess_act that is all zero
+                    stats.reads['l_act'] += cur_tile_size_M * cur_tile_size_K
+                    stats.reads['l_wgt'] += torch.sum(preprocess_act != 0).item() * cur_tile_size_N * operator.weight_tensor.nbits
+                    # find the row in preprocess_act that is all zero, if all zero originally, no cycles needed, if not, need one cycle
                     nnz_each_row = torch.sum(preprocess_act != 0, dim=-1)
+                    nnz_each_row_ori = torch.sum(cur_act != 0, dim=-1)
                     all_zero_row = nnz_each_row == 0
-                    compute_cycles += torch.sum(all_zero_row).item()
+                    all_zero_row_ori = nnz_each_row_ori == 0
+                    compute_cycles += torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
 
                     preprocess_cycles += cur_cycles
                     orginial_compute_cycles += torch.sum(cur_act != 0).item()
                     stats.num_ops += torch.sum(preprocess_act != 0).item() * cur_tile_size_N
 
+                    # write results to partial sum buffer
                     stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
                     stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
                     # if k == tile_num_K - 1:
@@ -174,11 +219,14 @@ class Simulator:
         stats.compute_cycles = max(compute_cycles, preprocess_cycles)
         stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
         stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+
         print(operator.name)
         print("original compute cycles: ", orginial_compute_cycles)
         print("compute cycles: ", compute_cycles)
         print("preprocess cycles: ", preprocess_cycles)
         print("total cycles: ", stats.total_cycles)
+
 
         return stats
                     
@@ -187,8 +235,14 @@ class Simulator:
         eq_fc = conv2d_2_fc(operator)
         return self.run_fc(eq_fc, spike_stored_in_buffer)
     
+    def run_maxpool(self, operator: MaxPool2D):
+        # we ignore maxpool since it can be done light-weight when storing spike back to memory
+        stats = Stats()
+        return stats
+    
     def run_LIF(self, operator: LIFNeuron):
         stats = Stats()
+        stats.reads['g_psum'] = operator.activation_tensor.get_size()
         spike_stored_in_buffer = False
         num_round = ceil_a_by_b(operator.num_neuron, self.accelerator.LIF_array_size)
         compute_cycles = num_round * operator.time_steps * 2 # one cycle for addition one cycle for mutiplication
@@ -225,15 +279,41 @@ class Simulator:
         if not spike_stored_in_buffer:
             init_mem_access += eq_sequence_length * eq_dim_per_head * 3
             stats.reads['dram'] += operator.act_q_tensor.sparse_map.numel() * 3
+
+        stats.writes['l_act'] += operator.act_q_tensor.sparse_map.numel() * 3
         # compute k*v first
+        if operator.sequence_length > operator.dim_per_head:
+            act_k = operator.act_k_tensor.sparse_map
+            act_v = operator.act_v_tensor.sparse_map
+        else:
+            act_k = operator.act_k_tensor.sparse_map
+            act_v = operator.act_q_tensor.sparse_map
+
+        # skip the all zero row when doing inner join
+
         num_op_per_output = ceil_a_by_b(eq_sequence_length, self.accelerator.bit_operation_width)
-        num_output = eq_dim_per_head * eq_dim_per_head * operator.num_head * operator.batch_size * operator.time_steps
-        stats.compute_cycles += num_op_per_output * num_output
+        additional_overhead = operator.time_steps * operator.batch_size * operator.num_head * eq_dim_per_head * num_op_per_output * 2
+        original_computation = operator.time_steps * operator.batch_size * operator.num_head * eq_dim_per_head * eq_dim_per_head * num_op_per_output
+        optimized_computation = self.optimize_attention(act_k, act_v, operator, eq_sequence_length, eq_dim_per_head)
+
+        stats.reads['l_act'] += optimized_computation * self.accelerator.bit_operation_width * 2
+        stats.writes['l_act'] += optimized_computation * 8 # store popcnt result as fp8
+        print("additional overhead: ", additional_overhead)
+        print("original computation: ", original_computation)
+        print("optimized computation: ", optimized_computation)
+        # assume workload perfectly balance
+        stats.compute_cycles += (additional_overhead + optimized_computation) // self.accelerator.bo_array_size
+
+        # num_op_per_output = ceil_a_by_b(eq_sequence_length, self.accelerator.bit_operation_width)
+        # num_output = eq_dim_per_head * eq_dim_per_head * operator.num_head * operator.batch_size * operator.time_steps
+        # stats.compute_cycles += num_op_per_output * num_output // self.accelerator.bo_array_size
+
         # then compute q * kv
-        act = operator.act_q_tensor.sparse_map
+        if operator.sequence_length > operator.dim_per_head:
+            act = operator.act_q_tensor.sparse_map
+        else:
+            act = operator.act_v_tensor.sparse_map
         act = act.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
-        # tile_size_M = 256
-        # tile_size_K = 16
         for t in range(operator.time_steps):
             for b in range(operator.batch_size):
                 for h in range(operator.num_head):
@@ -242,7 +322,7 @@ class Simulator:
                     input_dim = eq_dim_per_head
                     output_dim = eq_dim_per_head
                     sequence_length = eq_sequence_length
-                    time_steps = 1
+                    time_steps = 1 # no reuse between time steps
                     batch_size = 1
                     eq_fc = FC(name, input_dim, output_dim, sequence_length, time_steps, batch_size)
                     eq_fc.activation_tensor.sparse_map = cur_act
@@ -262,6 +342,21 @@ class Simulator:
         stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
 
         return stats
+    
+    def optimize_attention(self, act_k: torch.Tensor, act_v: torch.Tensor, operator: Attention, eq_sequence_length: int, eq_dim_per_head: int):
+
+        act_k = act_k.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
+        act_v = act_v.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
+        act_k = act_k.reshape(act_k.shape[0], act_k.shape[1], act_k.shape[2], act_k.shape[3], -1, self.accelerator.bit_operation_width)
+        act_v = act_v.reshape(act_v.shape[0], act_v.shape[1], act_v.shape[2], act_v.shape[3], -1, self.accelerator.bit_operation_width)
+        k_row_nnz = torch.sum(act_k != 0, dim=-1).permute(0, 1, 2, 4, 3)
+        v_row_nnz = torch.sum(act_v != 0, dim=-1).permute(0, 1, 2, 4, 3)
+        k_nonzero_row = torch.sum(k_row_nnz != 0, dim=-1)
+        v_nonzero_row = torch.sum(v_row_nnz != 0, dim=-1)
+
+        optimized_computation = torch.sum(k_nonzero_row * v_nonzero_row).item()
+        return optimized_computation
+
     
     def find_reuse(self, act: torch.Tensor):
         cycles = 0
@@ -355,7 +450,7 @@ class Simulator:
 
                     
 if __name__ == '__main__':
-    # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 32
+    # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
     accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
     nn = create_network('spikformer', 'test.pkl')
