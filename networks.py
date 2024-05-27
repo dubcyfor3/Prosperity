@@ -58,7 +58,8 @@ def spikformer_config(dataset='cifar10'):
         depth = 2
         num_head = 16
         mlp_ratio = 4
-        image_size = 128
+        image_size = [64, 32, 16, 8]
+        sequence_length = image_size[-1] * image_size[-1]
     else:
         raise ValueError('Unknown dataset')
 
@@ -205,8 +206,9 @@ def conv2d_2_fc(operator: Conv2D) -> FC:
     return eq_fc
 
 def create_network(name, spike_info):
+    dataset = spike_info.split('_')[1].split('.')[0]
     if name == 'spikformer':
-        config = spikformer_config()
+        config = spikformer_config(dataset=dataset)
         ops = []
         for key, value in config.items():
             if key.startswith('conv2d'):
@@ -223,11 +225,11 @@ def create_network(name, spike_info):
             sparse_act = pickle.load(f)
             for op in ops:
                 if isinstance(op, Attention):
-                    op.act_q_tensor.sparse_map = sparse_act[op.name + '_q'][0].contiguous()
-                    op.act_k_tensor.sparse_map = sparse_act[op.name + '_k'][0].contiguous()
-                    op.act_v_tensor.sparse_map = sparse_act[op.name + '_v'][0].contiguous()
+                    op.act_q_tensor.sparse_map = sparse_act[op.name + '_q'].contiguous()
+                    op.act_k_tensor.sparse_map = sparse_act[op.name + '_k'].contiguous()
+                    op.act_v_tensor.sparse_map = sparse_act[op.name + '_v'].contiguous()
                 elif op.activation_tensor.sparse:
-                    op.activation_tensor.sparse_map = sparse_act[op.name][0].contiguous()
+                    op.activation_tensor.sparse_map = sparse_act[op.name].contiguous()
         return ops
     else:
         raise ValueError('Unknown network name')
@@ -251,7 +253,7 @@ def print_sparsity(network, spike_info):
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    # ops = create_network('spikformer', 'test.pkl')
+    ops = create_network('spikformer', 'spikformer_cifar10dvs.pkl')
     # total_ops = compute_num_OPS(ops)
     # num_adder = 128
     # frequency = 500 * 1024 * 1024
