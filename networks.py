@@ -41,43 +41,56 @@ def vgg16_config():
     ])
     return vgg16
 
-def spikformer_config():
-    dim = 384
-    batch_size = 1
-    time_steps = 4
-    depth = 4
-    num_head = 12
-    mlp_ratio = 4
+def spikformer_config(dataset='cifar10'):
+    if dataset == 'cifar10' or dataset == 'cifar100':
+        dim = 384
+        batch_size = 1
+        time_steps = 4
+        depth = 4
+        num_head = 12
+        mlp_ratio = 4
+        image_size = [32, 32, 16, 8]
+        sequence_length = image_size[-1] * image_size[-1]
+    elif dataset == 'cifar10dvs':
+        dim = 256
+        batch_size = 1
+        time_steps = 16
+        depth = 2
+        num_head = 16
+        mlp_ratio = 4
+        image_size = 128
+    else:
+        raise ValueError('Unknown dataset')
+
     spikformer_SPS = OrderedDict([
-        ('conv2d_1', [32, dim // 8, dim // 4, 3, 1, 1, batch_size, time_steps]),
-        ('lif_1', [32 * 32 * dim // 4, batch_size, time_steps]),
-        ('conv2d_2', [32, dim // 4, dim // 2, 3, 1, 1, batch_size, time_steps]),
-        ('lif_2', [32 * 32 * dim // 2, batch_size, time_steps]),
-        ('maxpool2d_2', [32, dim // 2, 3, 1, 2, batch_size, time_steps]),
-        ('conv2d_3', [16, dim // 2, dim, 3, 1, 1, batch_size, time_steps]),
-        ('lif_3', [16 * 16 * dim, batch_size, time_steps]),
-        ('maxpool2d_3', [16, dim, 3, 1, 2, batch_size, time_steps]),
-        ('conv2d_rpe', [8, dim, dim, 3, 1, 1, batch_size, time_steps]),
-        ('lif_rpe', [8 * 8 * dim, batch_size, time_steps]),
+        ('conv2d_1', [image_size[0], dim // 8, dim // 4, 3, 1, 1, batch_size, time_steps]),
+        ('lif_1', [image_size[0] * image_size[0] * dim // 4, batch_size, time_steps]),
+        ('conv2d_2', [image_size[1], dim // 4, dim // 2, 3, 1, 1, batch_size, time_steps]),
+        ('lif_2', [image_size[1] * image_size[1] * dim // 2, batch_size, time_steps]),
+        ('maxpool2d_2', [image_size[1], dim // 2, 3, 1, 2, batch_size, time_steps]),
+        ('conv2d_3', [image_size[2], dim // 2, dim, 3, 1, 1, batch_size, time_steps]),
+        ('lif_3', [image_size[2] * image_size[2] * dim, batch_size, time_steps]),
+        ('maxpool2d_3', [image_size[2], dim, 3, 1, 2, batch_size, time_steps]),
+        ('conv2d_rpe', [image_size[3], dim, dim, 3, 1, 1, batch_size, time_steps]),
+        ('lif_rpe', [image_size[3] * image_size[3] * dim, batch_size, time_steps]),
     ])
     spikformer_encoder = OrderedDict([
-        ('fc_q', [dim, dim * 3, 64, batch_size, time_steps]),
-        ('lif_q', [dim * 64 * 3, batch_size, time_steps]),
+        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
         # qkv is fused
         # ('fc_k', [dim, dim, 64, batch_size, time_steps]),
         # ('lif_k', [dim * 64, batch_size, time_steps]),
         # ('fc_v', [dim, dim, 64, batch_size, time_steps]),
         # ('lif_v', [dim * 64, batch_size, time_steps]),
-        ('attention', [dim, 64, num_head, batch_size, time_steps]),
-        ('lif_attn', [dim * 64, batch_size, time_steps]),
-        ('fc_o', [dim, dim, 64, batch_size, time_steps]),
-        ('lif_o', [dim * 64, batch_size, time_steps]),
-        ('fc_1', [dim, dim * mlp_ratio, 64, batch_size, time_steps]),
-        ('lif_1', [dim * mlp_ratio * 64, batch_size, time_steps]),
-        ('fc_2', [dim * mlp_ratio, dim, 64, batch_size, time_steps]),
-        ('lif_2', [dim * 64, batch_size, time_steps]),
+        ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
+        ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
+        ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),
+        ('lif_o', [dim * sequence_length, batch_size, time_steps]),
+        ('fc_1', [dim, dim * mlp_ratio, sequence_length, batch_size, time_steps]),
+        ('lif_1', [dim * mlp_ratio * sequence_length, batch_size, time_steps]),
+        ('fc_2', [dim * mlp_ratio, dim, sequence_length, batch_size, time_steps]),
+        ('lif_2', [dim * sequence_length, batch_size, time_steps]),
     ])
-
     spikformer = OrderedDict([(key + '_sps', value) for key, value in spikformer_SPS.items()])
     for i in range(depth):
         encoder_with_idx = OrderedDict([(key + '_enc_' + str(i), value) for key, value in spikformer_encoder.items()])
