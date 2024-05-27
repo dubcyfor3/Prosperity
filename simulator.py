@@ -453,7 +453,7 @@ if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
     accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('spikformer', 'test.pkl')
+    nn = create_network('spikformer', 'spikformer_cifar100.pkl')
     sim = Simulator(accelerator, nn)
     sim.run_simulation()
     # operator = nn[12]
