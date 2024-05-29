@@ -76,7 +76,7 @@ def visualize_dag(G, filename):
 
 
 def idealistic_analysis():
-    nn = create_network('spikformer', 'test.pkl')
+    nn = create_network('spikformer', 'spikformer_cifar10.pkl')
     total_ori_nnz = 0
     total_rank_one_nnz = 0
     total_ideal_nnz = 0
@@ -90,7 +90,7 @@ def idealistic_analysis():
         tensor = eq_fc.activation_tensor.sparse_map
         tensor = tensor.reshape(-1, tensor.shape[-1])
         shape = tensor.shape
-        tile_size_M = 256
+        tile_size_M = 32
         tile_size_N = 16
         ori_nnzs = []
         rank_one_reduced_nnzs = []
@@ -99,9 +99,13 @@ def idealistic_analysis():
             for j in range(0, shape[1], tile_size_N):
                 tile = tensor[i:i+tile_size_M, j:j+tile_size_N]
                 tree, graph, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz = construct_subset_DAG(tile)
+                visualize_dag(tree, 'tree.png')
                 ori_nnzs.append(original_nnz)
                 rank_one_reduced_nnzs.append(rank_one_reduced_nnz)
                 ideal_reduced_nnzs.append(ideal_reduced_nnz)
+                break
+            break
+        break
 
         print("ori_nnzs: ", np.sum(ori_nnzs), "rank_one_reduced_nnzs: ", np.sum(rank_one_reduced_nnzs), "ideal_reduced_nnzs: ", np.sum(ideal_reduced_nnzs))
         rank_one_percentage = np.sum(rank_one_reduced_nnzs) / np.sum(ori_nnzs)
@@ -142,4 +146,4 @@ def all_zero_analysis():
     print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
-    all_zero_analysis()
+    idealistic_analysis()
