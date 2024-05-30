@@ -103,9 +103,6 @@ def idealistic_analysis():
                 ori_nnzs.append(original_nnz)
                 rank_one_reduced_nnzs.append(rank_one_reduced_nnz)
                 ideal_reduced_nnzs.append(ideal_reduced_nnz)
-                break
-            break
-        break
 
         print("ori_nnzs: ", np.sum(ori_nnzs), "rank_one_reduced_nnzs: ", np.sum(rank_one_reduced_nnzs), "ideal_reduced_nnzs: ", np.sum(ideal_reduced_nnzs))
         rank_one_percentage = np.sum(rank_one_reduced_nnzs) / np.sum(ori_nnzs)
@@ -121,6 +118,29 @@ def idealistic_analysis():
     ideal_percentage = total_ideal_nnz / total_ori_nnz
     print("rank_one_percentage: ", rank_one_percentage, "ideal_percentage: ", ideal_percentage)
 
+def nonzero_count(tensor: torch.Tensor, dim = 0):
+    shape = tensor.shape
+    tensor = tensor.reshape(shape[0], -1)
+    nnz = torch.sum(tensor, dim=dim)
+    nnz = nnz.to(torch.float32)
+    # plot nnz into a histogram
+    print("sparsity: ", get_density(tensor))
+    print("mean: ", torch.mean(nnz).item(), "std: ", torch.std(nnz).item(), "max: ", torch.max(nnz).item(), "min: ", torch.min(nnz).item())
+
+    return nnz
+
+def whole_network_analysis(nn):
+    nnz_list = []
+    for op in nn:
+        if isinstance(op, FC):
+            tensor = op.activation_tensor.sparse_map
+            nnz = nonzero_count(tensor, 0).tolist()
+            nnz_list.extend(nnz)
+
+    plt.hist(nnz, bins=4)
+    plt.xlabel('Number of Nonzeros in this neuron')
+    plt.ylabel('Frequency')
+    plt.savefig('nnz_hist_neuron.png')
 
 def all_zero_analysis():
     nn = create_network('spikformer', 'test.pkl')
@@ -146,4 +166,9 @@ def all_zero_analysis():
     print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
-    idealistic_analysis()
+    nn = create_network('spikformer', 'spikformer_cifar10.pkl')
+    fc = nn[10]
+    conv = nn[0]
+    whole_network_analysis(nn)
+
+    # idealistic_analysis()
