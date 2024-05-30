@@ -67,7 +67,7 @@ def SDT_config(dataset):
         dim = 512
         batch_size = 1
         time_steps = 4
-        depth = 2
+        depth = 4
         num_head = 8
         mlp_ratio = 4
         image_size = [32, 32, 16, 8]
@@ -295,9 +295,11 @@ def create_network(name, spike_info):
                 op.act_q_tensor.sparse_map = sparse_act[op.name + '_q'].contiguous()
                 op.act_k_tensor.sparse_map = sparse_act[op.name + '_k'].contiguous()
                 op.act_v_tensor.sparse_map = sparse_act[op.name + '_v'].contiguous()
-            elif op.activation_tensor.sparse:
+            elif isinstance(op, Conv2D) or isinstance(op, FC):
                 if op.name in sparse_act:
                     op.activation_tensor.sparse_map = sparse_act[op.name].contiguous()
+                else:
+                    raise ValueError(f'{op.name} not found in {spike_info}')
     return ops
     
 def print_sparsity(network, spike_info):
