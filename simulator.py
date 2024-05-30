@@ -38,7 +38,7 @@ class Stats:
 
 class Accelerator:
     def __init__(self, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
-        self.num_PE = num_PE
+        self.num_popcnt = num_PE
         self.sram_size = {}
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
         self.sram_size['act'] = sram_size['act'] # global buffer
@@ -277,14 +277,6 @@ class Simulator:
             eq_sequence_length = max(operator.sequence_length, operator.dim_per_head)
             eq_dim_per_head = min(operator.sequence_length, operator.dim_per_head)
 
-            init_mem_access = 0
-            if not spike_stored_in_buffer:
-                init_mem_access += eq_sequence_length * eq_dim_per_head * self.accelerator.bo_array_size * 3
-                stats.reads['dram'] += operator.act_q_tensor.sparse_map.numel() * 3
-            else:
-                stats.reads['g_act'] += operator.act_q_tensor.sparse_map.numel() * 3
-
-            stats.writes['l_act'] += operator.act_q_tensor.sparse_map.numel() * 3
             # compute k*v first
             if operator.sequence_length > operator.dim_per_head:
                 act_k = operator.act_k_tensor.sparse_map
@@ -293,57 +285,49 @@ class Simulator:
                 act_k = operator.act_k_tensor.sparse_map
                 act_v = operator.act_q_tensor.sparse_map
 
-            # skip the all zero row when doing inner join
-
-            num_op_per_output = ceil_a_by_b(eq_sequence_length, self.accelerator.bit_operation_width)
-            additional_overhead = operator.time_steps * operator.batch_size * operator.num_head * eq_dim_per_head * num_op_per_output * 2
-            original_computation = operator.time_steps * operator.batch_size * operator.num_head * eq_dim_per_head * eq_dim_per_head * num_op_per_output
-            optimized_computation = self.optimize_attention(act_k, act_v, operator, eq_sequence_length, eq_dim_per_head)
-
-            stats.reads['l_act'] += optimized_computation * self.accelerator.bit_operation_width * 2
-            stats.writes['l_act'] += optimized_computation * 8 # store popcnt result as fp8
-            print("additional overhead: ", additional_overhead)
-            print("original computation: ", original_computation)
-            print("optimized computation: ", optimized_computation)
-            # assume workload perfectly balance
-            stats.compute_cycles += (additional_overhead + optimized_computation) // self.accelerator.bo_array_size
-
-            # num_op_per_output = ceil_a_by_b(eq_sequence_length, self.accelerator.bit_operation_width)
-            # num_output = eq_dim_per_head * eq_dim_per_head * operator.num_head * operator.batch_size * operator.time_steps
-            # stats.compute_cycles += num_op_per_output * num_output // self.accelerator.bo_array_size
-
             # then compute q * kv
             if operator.sequence_length > operator.dim_per_head:
-                act = operator.act_q_tensor.sparse_map
+                act_q = operator.act_q_tensor.sparse_map
             else:
-                act = operator.act_v_tensor.sparse_map
-            act = act.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+                act_q = operator.act_v_tensor.sparse_map
+            act_q = act_q.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+            act_k = act_k.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+            act_v = act_v.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
             for t in range(operator.time_steps):
                 for b in range(operator.batch_size):
                     for h in range(operator.num_head):
-                        cur_act = act[t, b, h, :, :]
-                        name = f"{operator.name}_t{t}_b{b}_h{h}"
+                        cur_act_k = act_k[t, b, h, :, :].transpose(0, 1).contiguous()
+                        name = f"{operator.name}_t{t}_b{b}_h{h}_kv"
+                        input_dim = eq_sequence_length
+                        output_dim = eq_dim_per_head
+                        sequence_length = eq_dim_per_head
+                        time_steps = 1 # no reuse between time steps
+                        batch_size = 1
+                        eq_fc_1 = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
+                        eq_fc_1.activation_tensor.sparse_map = cur_act_k
+                        out_weight_stored_in_buffer = eq_fc_1.output_tensor.get_size() < self.accelerator.sram_size['wgt']
+                        if not out_weight_stored_in_buffer:
+                            stats.writes['dram'] += eq_fc_1.weight_tensor.get_size() // 8
+                        cur_stats_kv = self.run_fc(eq_fc_1, spike_stored_in_buffer, spike_stored_in_buffer)
+                        stats.total_cycles += cur_stats_kv.total_cycles
+                        stats.mem_stall_cycles += cur_stats_kv.mem_stall_cycles
+                        stats.compute_cycles += cur_stats_kv.compute_cycles
+                        stats += cur_stats_kv
+
+                        cur_act_q = act_q[t, b, h, :, :]
+                        name = f"{operator.name}_t{t}_b{b}_h{h}_qkv"
                         input_dim = eq_dim_per_head
                         output_dim = eq_dim_per_head
                         sequence_length = eq_sequence_length
-                        time_steps = 1 # no reuse between time steps
+                        time_steps = 1
                         batch_size = 1
-                        eq_fc = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
-                        eq_fc.activation_tensor.sparse_map = cur_act
-                        out_spike_stored_in_buffer = cur_act.numel() < self.accelerator.sram_size['act']
-                        out_weight_stored_in_buffer = eq_fc.weight_tensor.get_size() < self.accelerator.sram_size['wgt']
-                        if not out_spike_stored_in_buffer:
-                            stats.writes['dram'] += cur_act.numel()
-                        if not out_weight_stored_in_buffer:
-                            stats.writes['dram'] += eq_fc.weight_tensor.get_size()
-                        cur_stats = self.run_fc(eq_fc, out_spike_stored_in_buffer, out_weight_stored_in_buffer)
-                        stats.compute_cycles += cur_stats.total_cycles
-
-            total_mem_access = stats.reads['dram'] + stats.writes['dram']
-            middle_mem_access = total_mem_access - init_mem_access
-            init_latency = init_mem_access // self.accelerator.mem_if_width
-            stats.mem_stall_cycles = init_latency + max(0, middle_mem_access // self.accelerator.mem_if_width - stats.compute_cycles)
-            stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+                        eq_fc_2 = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
+                        eq_fc_2.activation_tensor.sparse_map = cur_act_q
+                        cur_stats_qkv = self.run_fc(eq_fc_2, spike_stored_in_buffer, out_weight_stored_in_buffer)
+                        stats.total_cycles += cur_stats_qkv.total_cycles
+                        stats.mem_stall_cycles += cur_stats_qkv.mem_stall_cycles
+                        stats.compute_cycles += cur_stats_qkv.compute_cycles
+                        stats += cur_stats_qkv
 
         elif operator.attention_type == 'SDT':
             init_mem_access = 0
@@ -355,13 +339,14 @@ class Simulator:
 
             stats.writes['l_act'] += operator.act_q_tensor.sparse_map.numel() * 3
 
-            num_op_per_output = ceil_a_by_b(operator.sequence_length, self.accelerator.bit_operation_width)
-            num_op = operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * num_op_per_output
-            stats.compute_cycles += num_op // self.accelerator.bo_array_size
-            stats.reads['l_act'] += num_op * self.accelerator.bit_operation_width * 2
-            stats.writes['l_act'] += num_op * 8
+
+            num_op = operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length
+
+            stats.compute_cycles += num_op // self.accelerator.adder_array_size
+            stats.reads['l_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length * 2
+            stats.writes['l_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head
             lif = LIFNeuron('lif_attn', operator.dim_per_head * operator.num_head, operator.batch_size, operator.time_steps)
-            lif_stats, _ = self.run_LIF(lif, operator.dim_per_head, 1)
+            lif_stats, _ = self.run_LIF(lif, self.accelerator.adder_array_size, 1)
             stats.compute_cycles += max(0, lif_stats.total_cycles - stats.compute_cycles)
             stats.reads['l_act'] += num_op * self.accelerator.bit_operation_width * 2
             out_spike_stored_in_buffer = False
@@ -370,7 +355,8 @@ class Simulator:
                 out_spike_stored_in_buffer = True
             else:
                 stats.writes['dram'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length
-            stats.compute_cycles += num_op // self.accelerator.bo_array_size
+
+            stats.compute_cycles += num_op // self.accelerator.adder_array_size
             
             total_mem_access = stats.reads['dram'] + stats.writes['dram']
             middle_mem_access = total_mem_access - init_mem_access
@@ -380,6 +366,7 @@ class Simulator:
 
         print(operator.name)
         print("total cycles: ", stats.total_cycles)
+        print("compute cycles: ", stats.compute_cycles)
         if operator.attention_type == 'spikformer':
             out_spike_stored_in_buffer = False
 
@@ -402,7 +389,7 @@ class Simulator:
     
     def find_reuse(self, act: torch.Tensor):
         cycles = 0
-        cycles += 1 # find the one with most bits
+        cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
         preprocessed_act = act.clone()
         for i in range(act.shape[0]):
             cur_row = act[i]
@@ -422,20 +409,19 @@ class Simulator:
             is_real_subset = torch.logical_and(is_subset, ~is_excluded)
 
             cycles += 1 # find all subset of this row in CAM
-            cycles += 1 # mask the searched row in CAM
+            # find the largest subset through look up the popcnt result
 
             if torch.sum(is_real_subset) == 0:
-                cycles += 1 # if no subset, search for next begin point in CAM
+                # cycles += 1 # if no subset, search for next begin point in CAM
                 continue
             subset_row = act[is_real_subset]
             subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
             max_subset_size = torch.max(subset_row_nnz).item()
             max_subset = subset_row[torch.argmax(subset_row_nnz)]
-            # cycles += 1 popcnt is not in critical path
             if max_subset_size > 1:
                 preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
-            else:
-                cycles += 1 # do the popcnt and then has to search the next begin point in CAM
+            # else:
+                # cycles += 1 # search the next begin point in CAM
 
         return preprocessed_act, cycles
 
@@ -495,8 +481,8 @@ if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
     accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('vgg16', 'vgg16_cifar10_new.pkl')
-    nn = nn[26:]
+    nn = create_network('SDT', 'sdt_cifar10.pkl')
+    # nn = nn[10:]
     sim = Simulator(accelerator, nn)
     sim.run_simulation()
     # operator = nn[12]
