@@ -5,6 +5,7 @@ import numpy as np
 from collections import defaultdict
 from collections import OrderedDict
 import logging
+from typing import Union
 
 logging.basicConfig(level=logging.INFO)
 
@@ -37,7 +38,8 @@ class Stats:
 
 
 class Accelerator:
-    def __init__(self, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
+    def __init__(self, type, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
+        self.accelerator_type = type
         self.num_popcnt = num_PE
         self.sram_size = {}
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
@@ -53,6 +55,22 @@ class Simulator:
     def __init__(self, accelerator: Accelerator, network: list):
         self.accelerator = accelerator
         self.network = network
+
+    def run_simulation_PTB(self):
+        stats = OrderedDict()
+        for operator in self.network:
+            if isinstance(operator, Conv2D) or isinstance(operator, FC):
+                stats[operator.name] = self.run_PTB(operator)
+            else:
+                continue
+
+        total_stats = Stats()
+        for key, value in stats.items():
+            total_stats += value
+            total_stats.total_cycles += value.total_cycles
+
+        print("total cycles: ", total_stats.total_cycles)
+        print("total time: ", total_stats.total_cycles / (500 * 1024 * 1024))
     
     def run_simulation(self):
         stats = OrderedDict()
@@ -475,16 +493,121 @@ class Simulator:
         print("total nnz: ", total_nnzs)
         print("percentage: ", reduced_nnz / total_nnzs)
         return reduced_nnz, total_nnzs
+    
+    def StSAP(self, act: torch.Tensor):
+        processed_act = act.clone()
+        processed_act = act.reshape(-1, act.shape[-1])
+        # find row with all zero
+        all_zero_row = torch.sum(processed_act != 0, dim=-1) == 0
+        # find row with all nonzero
+        all_nonzero_row = torch.sum(processed_act != 0, dim=-1) == processed_act.shape[-1]
+        excepted_row = torch.logical_or(all_zero_row, all_nonzero_row)
+        # get all the row except all zero row and all nonzero row
+        processed_act = processed_act[~excepted_row]
+        cur_size = processed_act.shape[0]
+        searched_row = torch.zeros(processed_act.shape[0], dtype=torch.bool)
+        for i in range(processed_act.shape[0] - 1):
+            if searched_row[i]:
+                continue
+            cur_row = processed_act[i]
+            rest_row = processed_act[i+1:]
+            and_result = torch.logical_and(cur_row, rest_row)
+            non_overlap_row = torch.sum(and_result, dim=-1) == 0
+            # pad the left of non_overlap_row to the original shape
+            non_overlap_row = torch.cat([torch.zeros(i + 1, dtype=torch.bool), non_overlap_row])
+            non_overlap_row = torch.logical_and(non_overlap_row, ~searched_row)
+            # find the first nonzero in non_overlap_row
+            first_nonzero = torch.argmax(non_overlap_row.to(torch.int)).item()
+            if first_nonzero != 0:
+                cur_size -= 1
+                searched_row[first_nonzero] = True
+
+        processed_size = cur_size + torch.sum(all_nonzero_row)
+        return processed_size.item()
+
+    # def run_conv2d_PTB(self, operator: Conv2D):
+    #     stats = Stats()
+    #     time_window_size = 4
+    #     input_shape = operator.activation_tensor.sparse_map.shape
+    #     new_shape = [-1, time_window_size]
+    #     new_shape.extend(input_shape[1:])
+    #     input_tensor = operator.activation_tensor.sparse_map.reshape(new_shape)
+    #     input_tensor = input_tensor.sum(dim=1)
+    #     unrolled_tensor = img2col(input_tensor, operator.kernel_size, operator.stride, operator.padding)
+    #     unrolled_tensor = unrolled_tensor.permute(1, 2, 0).contiguous()
+    #     processed_size = self.StSAP(unrolled_tensor)
+    #     input_length = processed_size
+    #     repeate_times = ceil_a_by_b(operator.output_channel, 16)
+    #     stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
+
+    #     if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
+    #         stats.reads['dram'] += operator.activation_tensor.get_size() * repeate_times
+    #     else:
+    #         stats.reads['dram'] += operator.activation_tensor.get_size()
+    #     stats.reads['dram'] += operator.weight_tensor.get_size()
+    #     stats.writes['dram'] += operator.output_tensor.get_size() // 8
+
+    #     init_mem_access = 16 * 8 * (8 + 4)
+    #     total_mem_access = stats.reads['dram'] + stats.writes['dram']
+    #     middle_mem_access = total_mem_access - init_mem_access
+    #     init_latency = init_mem_access // self.accelerator.mem_if_width
+    #     middle_latency = middle_mem_access // self.accelerator.mem_if_width
+    #     stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
+    #     stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+    #     print(operator.name)
+    #     print("total cycles: ", stats.total_cycles)
+    #     return stats
+    
+    def run_PTB(self, operator: Union[FC, Conv2D]):
+        stats = Stats()
+        time_window_size = 4
+        input_shape = operator.activation_tensor.sparse_map.shape
+        new_shape = [-1, time_window_size]
+        new_shape.extend(input_shape[1:])
+        input_tensor = operator.activation_tensor.sparse_map.reshape(new_shape)
+        input_tensor = input_tensor.sum(dim=1)
+        if isinstance(operator, FC):
+            input_tensor = input_tensor.permute(1, 0).contiguous()
+            output_dim = operator.output_dim
+        elif isinstance(operator, Conv2D):
+            input_tensor = img2col(input_tensor, operator.kernel_size, operator.stride, operator.padding)
+            input_tensor = input_tensor.permute(1, 2, 0).contiguous()
+            output_dim = operator.output_channel
+        input_length = self.StSAP(input_tensor)
+        repeate_times = ceil_a_by_b(output_dim, 16)
+        stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
+
+        if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
+            stats.reads['dram'] += operator.activation_tensor.get_size() * repeate_times
+        else:
+            stats.reads['dram'] += operator.activation_tensor.get_size()
+        stats.reads['dram'] += operator.weight_tensor.get_size()
+        stats.writes['dram'] += operator.output_tensor.get_size() // 8
+
+        init_mem_access = 16 * 8 * (8 + 4)
+        total_mem_access = stats.reads['dram'] + stats.writes['dram']
+        middle_mem_access = total_mem_access - init_mem_access
+        init_latency = init_mem_access // self.accelerator.mem_if_width
+        middle_latency = middle_mem_access // self.accelerator.mem_if_width
+        stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
+        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+
+        print(operator.name)
+        print("total cycles: ", stats.total_cycles)
+
+        return stats
 
                     
 if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
-    accelerator = Accelerator(num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('SDT', 'sdt_cifar10.pkl')
+    accelerator = Accelerator(type='PTB', num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
+    nn = create_network('vgg16', 'vgg16_cifar10_t32.pkl')
     # nn = nn[10:]
     sim = Simulator(accelerator, nn)
-    sim.run_simulation()
+    sim.run_simulation_PTB()
     # operator = nn[12]
     # sim.run_attention(operator, spike_stored_in_buffer=False)
     # sim.find_common_sequence(operator)
