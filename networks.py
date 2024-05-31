@@ -116,7 +116,7 @@ def SDT_config(dataset):
 
 def vgg16_config():
     batch_size = 1
-    time_steps = 4
+    time_steps = 32
     vgg16 = OrderedDict([
         ('conv2d_1', [32, 64, 64, 3, 1, 1, batch_size, time_steps]),
         ('lif_1', [32 * 32 * 64, batch_size, time_steps]),
