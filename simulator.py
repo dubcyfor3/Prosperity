@@ -38,9 +38,9 @@ class Stats:
 
 
 class Accelerator:
-    def __init__(self, type, num_PE, sram_size, adder_array_size=128, LIF_array_size=32, mem_if_width=1024):
-        self.accelerator_type = type
-        self.num_popcnt = num_PE
+    def __init__(self, type, num_popcnt, sram_size, adder_array_size=16, LIF_array_size=32, mem_if_width=1024):
+        self.type = type
+        self.num_popcnt = num_popcnt
         self.sram_size = {}
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
         self.sram_size['act'] = sram_size['act'] # global buffer
@@ -56,11 +56,17 @@ class Simulator:
         self.accelerator = accelerator
         self.network = network
 
+    def sim(self):
+        if self.accelerator.type == 'PTB':
+            self.run_simulation_PTB()
+        else:
+            self.run_simulation()
+
     def run_simulation_PTB(self):
         stats = OrderedDict()
         for operator in self.network:
             if isinstance(operator, Conv2D) or isinstance(operator, FC):
-                stats[operator.name] = self.run_PTB(operator)
+                stats[operator.name] = self.run_PTB_convfc(operator)
             else:
                 continue
 
@@ -407,7 +413,7 @@ class Simulator:
     
     def find_reuse(self, act: torch.Tensor):
         cycles = 0
-        cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
+        # cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
         preprocessed_act = act.clone()
         for i in range(act.shape[0]):
             cur_row = act[i]
@@ -432,6 +438,8 @@ class Simulator:
             if torch.sum(is_real_subset) == 0:
                 # cycles += 1 # if no subset, search for next begin point in CAM
                 continue
+            cycles += 1 # find the largest subset
+
             subset_row = act[is_real_subset]
             subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
             max_subset_size = torch.max(subset_row_nnz).item()
@@ -559,7 +567,7 @@ class Simulator:
     #     print("total cycles: ", stats.total_cycles)
     #     return stats
     
-    def run_PTB(self, operator: Union[FC, Conv2D]):
+    def run_PTB_convfc(self, operator: Union[FC, Conv2D]):
         stats = Stats()
         time_window_size = 4
         input_shape = operator.activation_tensor.sparse_map.shape
@@ -575,7 +583,7 @@ class Simulator:
             input_tensor = input_tensor.permute(1, 2, 0).contiguous()
             output_dim = operator.output_channel
         input_length = self.StSAP(input_tensor)
-        repeate_times = ceil_a_by_b(output_dim, 16)
+        repeate_times = ceil_a_by_b(output_dim, 2)
         stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
 
         if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
@@ -603,11 +611,11 @@ class Simulator:
 if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
-    accelerator = Accelerator(type='PTB', num_PE=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('vgg16', 'vgg16_cifar10_t32.pkl')
-    # nn = nn[10:]
+    accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
+    nn = create_network('lenet5', 'lenet5_mnist.pkl')
+    # nn = nn[1:]
     sim = Simulator(accelerator, nn)
-    sim.run_simulation_PTB()
+    sim.sim()
     # operator = nn[12]
     # sim.run_attention(operator, spike_stored_in_buffer=False)
     # sim.find_common_sequence(operator)
