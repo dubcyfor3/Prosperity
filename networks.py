@@ -153,6 +153,19 @@ def vgg16_config():
     ])
     return vgg16
 
+def lenet5_config():
+    batch_size = 1
+    time_steps = 32
+    lenet5 = OrderedDict([
+        ('conv2d_1', [16, 6, 16, 5, 0, 1, batch_size, time_steps]),
+        ('lif_2', [12 * 12 * 16, batch_size, time_steps]),
+        ('fc_0', [6 * 6 * 16, 120, 1, batch_size, time_steps]),
+        ('lif_3', [120, batch_size, time_steps]),
+        ('fc_1', [120, 84, 1, batch_size, time_steps]),
+        ('lif_4', [84, batch_size, time_steps]),
+    ])
+    return lenet5
+
 def compute_num_OPS(nn):
     total_ops = 0
     for op in nn:
@@ -274,6 +287,8 @@ def create_network(name, spike_info):
         config = SDT_config(dataset=dataset)
     elif name == 'vgg16':
         config = vgg16_config()
+    elif name == 'lenet5':
+        config = lenet5_config()
     else:
         raise ValueError('Unknown network name')
     ops = []
