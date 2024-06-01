@@ -19,7 +19,7 @@ def img2col(input_tensor, kernel_size, stride=1, padding=0):
     padding (int): Padding added to all four sides of the input tensor
     
     Returns:
-    torch.Tensor: Output column tensor
+    torch.Tensor: Output column tensor of shape (batch_size, num_patches, C*kernel_size*kernel_size)
     """
     # Add padding to the input tensor
     if padding > 0:
