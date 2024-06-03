@@ -296,7 +296,7 @@ class Simulator:
     def run_attention(self, operator: Attention, spike_stored_in_buffer=False):
         stats = Stats()
 
-        if operator.attention_type == 'spikformer':
+        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikeBERT':
             # change the q k v multiplication order according to matrix shape, reduce computation overhead
             eq_sequence_length = max(operator.sequence_length, operator.dim_per_head)
             eq_dim_per_head = min(operator.sequence_length, operator.dim_per_head)
@@ -391,7 +391,7 @@ class Simulator:
         print(operator.name)
         print("total cycles: ", stats.total_cycles)
         print("compute cycles: ", stats.compute_cycles)
-        if operator.attention_type == 'spikformer':
+        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikeBERT':
             out_spike_stored_in_buffer = False
 
         return stats, out_spike_stored_in_buffer
@@ -612,7 +612,7 @@ if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
     accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('lenet5', 'lenet5_mnist.pkl')
+    nn = create_network('spikeBERT', 'data/spikebert_sst2.pkl')
     # nn = nn[1:]
     sim = Simulator(accelerator, nn)
     sim.sim()
