@@ -9,6 +9,10 @@ from typing import Union
 
 logging.basicConfig(level=logging.INFO)
 
+ori_nnzs = []
+processed_nnzs = []
+total_elements = []
+
 class Stats:
     def __init__(self):
         self.total_cycles = 0
@@ -16,6 +20,7 @@ class Stats:
         self.compute_cycles = 0
         self.num_ops = 0
         self.LIF_latency = 0
+        self.preprocess_stall_cycles = 0
         self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum', 'l_act', 'l_wgt']
         self.reads = {space: 0 for space in self.mem_namespace}
         self.writes = {space: 0 for space in self.mem_namespace}
@@ -28,6 +33,7 @@ class Stats:
             added_stats.total_cycles = self.total_cycles # handle cycles manually
             added_stats.mem_stall_cycles = self.mem_stall_cycles
             added_stats.compute_cycles = self.compute_cycles
+            added_stats.preprocess_stall_cycles = self.preprocess_stall_cycles + other.preprocess_stall_cycles
             added_stats.num_ops = self.num_ops + other.num_ops
             added_stats.LIF_latency = 0
             added_stats.mem_namespace = self.mem_namespace
@@ -55,6 +61,7 @@ class Simulator:
     def __init__(self, accelerator: Accelerator, network: list):
         self.accelerator = accelerator
         self.network = network
+        self.track_sparsity_increment = True
 
     def sim(self):
         if self.accelerator.type == 'PTB':
@@ -62,6 +69,7 @@ class Simulator:
         else:
             self.run_simulation()
 
+        
     def run_simulation_PTB(self):
         stats = OrderedDict()
         for operator in self.network:
@@ -116,6 +124,13 @@ class Simulator:
         print("total ops: ", total_stats.num_ops)
         print("mem access", total_stats.reads['dram'] + total_stats.writes['dram'])
         print("buffer access", total_stats.reads['g_act'] + total_stats.writes['g_act'] + total_stats.reads['g_wgt'] + total_stats.writes['g_wgt'] + total_stats.reads['g_psum'] + total_stats.writes['g_psum'])
+        print("preprocess stall cycles: ", total_stats.preprocess_stall_cycles)
+
+        if self.track_sparsity_increment:
+            original_sparsity = sum(ori_nnzs) / sum(total_elements)
+            processed_sparsity = sum(processed_nnzs) / sum(total_elements)
+            print("original sparsity: ", original_sparsity)
+            print("processed sparsity: ", processed_sparsity)
 
         cycles_conv = 0
         cycles_fc = 0
@@ -231,6 +246,13 @@ class Simulator:
                     #     stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
                     #     stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
 
+                    if self.track_sparsity_increment:
+                        ori_nnzs.append(torch.sum(cur_act != 0).item())
+                        processed_nnzs.append(torch.sum(preprocess_act != 0).item())
+                        total_elements.append(cur_tile_size_M * cur_tile_size_K)
+                        # print("original density", get_density(cur_act))
+                        # print("processed density", get_density(preprocess_act))
+
         init_mem_access = 0
         if not weight_stored_in_buffer:
             init_mem_access += min(tile_size_K, K) * min(tile_size_N, N) * operator.weight_tensor.nbits # read the first tile from dram to buffer
@@ -241,6 +263,7 @@ class Simulator:
         init_latency = init_mem_access // self.accelerator.mem_if_width
         middle_latency = middle_mem_access // self.accelerator.mem_if_width
         stats.compute_cycles = max(compute_cycles, preprocess_cycles)
+        stats.preprocess_stall_cycles = max(0, preprocess_cycles - compute_cycles)
         stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
         stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
 
@@ -413,7 +436,7 @@ class Simulator:
     
     def find_reuse(self, act: torch.Tensor):
         cycles = 0
-        # cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
+        cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
         preprocessed_act = act.clone()
         for i in range(act.shape[0]):
             cur_row = act[i]
@@ -438,14 +461,14 @@ class Simulator:
             if torch.sum(is_real_subset) == 0:
                 # cycles += 1 # if no subset, search for next begin point in CAM
                 continue
-            cycles += 1 # find the largest subset
+            # cycles += 1 # find the largest subset
 
             subset_row = act[is_real_subset]
             subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
             max_subset_size = torch.max(subset_row_nnz).item()
             max_subset = subset_row[torch.argmax(subset_row_nnz)]
-            if max_subset_size > 1:
-                preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
+            # if max_subset_size > 1: # can also reuse even when the size is 1
+            preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
             # else:
                 # cycles += 1 # search the next begin point in CAM
 
@@ -612,7 +635,7 @@ if __name__ == '__main__':
     # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
 
     accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('spikeBERT', 'data/spikebert_sst2.pkl')
+    nn = create_network('vgg16', 'data/vgg16_cifar10.pkl')
     # nn = nn[1:]
     sim = Simulator(accelerator, nn)
     sim.sim()
