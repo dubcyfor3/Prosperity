@@ -24,6 +24,8 @@ class Stats:
         self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum', 'l_act', 'l_wgt']
         self.reads = {space: 0 for space in self.mem_namespace}
         self.writes = {space: 0 for space in self.mem_namespace}
+        self.original_sparsity = 0
+        self.processed_sparsity = 0
 
     def __add__(self, other):
         if not isinstance(other, Stats):
@@ -41,6 +43,7 @@ class Stats:
             added_stats.writes = {space: self.writes[space] + other.writes[space] for space in self.mem_namespace}
             
             return added_stats
+        
 
 
 class Accelerator:
@@ -55,6 +58,8 @@ class Accelerator:
         self.LIF_array_size = LIF_array_size
         self.bit_operation_width = 32
         self.bo_array_size = 4
+        self.SpMM_tile_size_M = 256
+        self.SpMM_tile_size_K = 16
         self.mem_if_width = mem_if_width
 
 class Simulator:
@@ -65,9 +70,11 @@ class Simulator:
 
     def sim(self):
         if self.accelerator.type == 'PTB':
-            self.run_simulation_PTB()
+            stats = self.run_simulation_PTB()
         else:
-            self.run_simulation()
+            stats = self.run_simulation()
+
+        return stats
 
         
     def run_simulation_PTB(self):
@@ -85,6 +92,8 @@ class Simulator:
 
         print("total cycles: ", total_stats.total_cycles)
         print("total time: ", total_stats.total_cycles / (500 * 1024 * 1024))
+
+        return total_stats
     
     def run_simulation(self):
         stats = OrderedDict()
@@ -129,6 +138,8 @@ class Simulator:
         if self.track_sparsity_increment:
             original_sparsity = sum(ori_nnzs) / sum(total_elements)
             processed_sparsity = sum(processed_nnzs) / sum(total_elements)
+            total_stats.original_sparsity = original_sparsity
+            total_stats.processed_sparsity = processed_sparsity
             print("original sparsity: ", original_sparsity)
             print("processed sparsity: ", processed_sparsity)
 
@@ -146,17 +157,26 @@ class Simulator:
         print("conv percentage: ", cycles_conv / total_stats.total_cycles)
         print("fc percentage: ", cycles_fc / total_stats.total_cycles)
         print("attn percentage: ", cycles_attn / total_stats.total_cycles)
+
+        return total_stats
     
     def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
         stats = Stats()
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
+        assert operator.time_steps * operator.sequence_length * operator.input_dim == operator.activation_tensor.sparse_map.numel()
         # reshape activation tensor
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.reshape(operator.time_steps, operator.sequence_length, operator.input_dim)
+        # transpose time step and sequence length
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
+
+
         input_shape = operator.activation_tensor.shape
         input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
+        
         input_tensor = operator.activation_tensor.sparse_map.reshape(input_shape)
         M, K, N = input_shape[0], input_shape[1], operator.weight_tensor.shape[1]
-        tile_size_M = 256
-        tile_size_K = 16
+        tile_size_M = self.accelerator.SpMM_tile_size_M
+        tile_size_K = self.accelerator.SpMM_tile_size_K
         tile_size_N = self.accelerator.adder_array_size
         tile_num_M = ceil_a_by_b(M, tile_size_M)
         tile_num_K = ceil_a_by_b(K, tile_size_K)
@@ -319,7 +339,9 @@ class Simulator:
     def run_attention(self, operator: Attention, spike_stored_in_buffer=False):
         stats = Stats()
 
-        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikeBERT':
+        out_spike_stored_in_buffer = False
+
+        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikebert':
             # change the q k v multiplication order according to matrix shape, reduce computation overhead
             eq_sequence_length = max(operator.sequence_length, operator.dim_per_head)
             eq_dim_per_head = min(operator.sequence_length, operator.dim_per_head)
@@ -376,7 +398,7 @@ class Simulator:
                         stats.compute_cycles += cur_stats_qkv.compute_cycles
                         stats += cur_stats_qkv
 
-        elif operator.attention_type == 'SDT':
+        elif operator.attention_type == 'sdt':
             init_mem_access = 0
             if not spike_stored_in_buffer:
                 init_mem_access += operator.sequence_length * operator.dim_per_head * 3
@@ -411,10 +433,13 @@ class Simulator:
             stats.mem_stall_cycles = init_latency + max(0, middle_mem_access // self.accelerator.mem_if_width - stats.compute_cycles)
             stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
 
+        else:
+            raise Exception("unsupported attention type")
+        
         print(operator.name)
         print("total cycles: ", stats.total_cycles)
         print("compute cycles: ", stats.compute_cycles)
-        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikeBERT':
+        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikebert':
             out_spike_stored_in_buffer = False
 
         return stats, out_spike_stored_in_buffer
@@ -632,49 +657,37 @@ class Simulator:
 
                     
 if __name__ == '__main__':
-    # Adder 8 bit * 128, MAC 8 bit * 32, Bitwise 32 bit * 4
+    # Adder 8 bit * 128
 
     accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
-    nn = create_network('vgg16', 'data/vgg16_cifar10.pkl')
-    # nn = nn[1:]
-    sim = Simulator(accelerator, nn)
-    sim.sim()
-    # operator = nn[12]
-    # sim.run_attention(operator, spike_stored_in_buffer=False)
-    # sim.find_common_sequence(operator)
-    # pre_nnzs = []
-    # total_nnzs = []
-    # for operator in nn:
-    #     if isinstance(operator, Conv2D):
-    #         eq_fc = conv2d_2_fc(operator)
-    #         print(eq_fc.name)
-    #         pre_nnz, total_nnz = sim.find_largest_subset(eq_fc)
-    #     if isinstance(operator, FC):
-    #         print(operator.name)
-    #         pre_nnz, total_nnz = sim.find_largest_subset(operator)
-    #     else:
-    #         continue
-    #     pre_nnzs.append(pre_nnz)
-    #     total_nnzs.append(total_nnz)
-    
-    # print("preprocessed nnzs: ", sum(pre_nnzs))
-    # print("total nnzs: ", sum(total_nnzs))
-    # print("percentage: ", sum(pre_nnzs) / sum(total_nnzs))
+    ST_model_list = ['spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100', 'spikebert_mr', 'spikebert_sst2']
+    SCNN_model_list = ['vgg16_cifar10', 'vgg16_cifar100', 'lenet5_mnist']
+    stats_list = []
 
-    # fc = nn[10]
-    # # create a torch tensor, that is a upper triangular matrix
-    # b = torch.rand(10, 10)
-    # # # uppder triangular
-    # b = torch.triu(b, diagonal=1)
-    # # cut half of the row
-    # b = b[:5]
-    # # b = torch.eye(100)
-    # b = b.to(torch.bool)
-    # cycles, new_b = sim.find_reuse(b)
-    # print(cycles)
+    run_ST = True
+    run_SCNN = True
+    run_single_model = False
+    model_list = []
+    if run_ST:
+        model_list.extend(ST_model_list)
+    if run_SCNN:
+        model_list.extend(SCNN_model_list)
+    if run_single_model:
+        model_list = ['sdt_cifar10dvs']
 
-    # fc.activation_tensor.sparse_map = b
-    # fc.activation_tensor.shape = b.shape
-    # sim.find_largest_subset(fc)
+    for name in model_list:
+        model_name = name.split('_')[0]
+        spike_info_path = 'data/' + name + '.pkl'
+        nn = create_network(model_name, spike_info_path)
+        sim = Simulator(accelerator, nn)
+        stats = sim.sim()
+        stats_list.append(stats)
 
+    with open('output_new.txt', 'a') as f:  # Open the file in append mode
+        for i, stats in enumerate(stats_list):
+            f.write(f"model: {model_list[i]}\n")
+            f.write(f"total time: {stats.total_cycles / (500 * 1024 * 1024)}\n")
+            f.write(f"original sparsity: {stats.original_sparsity}\n")
+            f.write(f"processed sparsity: {stats.processed_sparsity}\n")
+            f.write("\n")
 
