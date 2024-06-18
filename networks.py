@@ -99,10 +99,10 @@ class Attention:
         self.act_q_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
         self.act_k_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
         self.act_v_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
-        if attention_type == 'spikformer' or attention_type == 'spikeBERT':
+        if attention_type == 'spikformer' or attention_type == 'spikebert':
             self.attn_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, sequence_length], 'fp8', sparse=True)
             self.output_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'fp8', sparse=False)
-        elif attention_type == 'SDT':
+        elif attention_type == 'sdt':
             self.kv_out_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
             self.output_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
         else:
@@ -120,15 +120,16 @@ def conv2d_2_fc(operator: Conv2D) -> FC:
 
 def create_network(name, spike_info):
     dataset = spike_info.split('_')[1].split('.')[0]
+    name = name.lower()
     if name == 'spikformer':
         config = spikformer_config(dataset=dataset)
-    elif name == 'SDT':
+    elif name == 'sdt':
         config = SDT_config(dataset=dataset)
     elif name == 'vgg16':
         config = vgg16_config()
     elif name == 'lenet5':
         config = lenet5_config()
-    elif name == 'spikeBERT':
+    elif name == 'spikebert':
         config = spikeBERT_config(dataset=dataset)
     else:
         raise ValueError('Unknown network name')
@@ -164,7 +165,7 @@ def print_sparsity(network, spike_info):
             sparse_act = pickle.load(f)
             for key, value in sparse_act.items():
                 logging.info(f'{key}: {get_density(value):.4f}')
-    elif network == 'spikeBERT':
+    elif network == 'spikebert':
         with open(spike_info, 'rb') as f:
             sparse_act = pickle.load(f)
             for key, value in sparse_act.items():
@@ -183,7 +184,7 @@ def print_sparsity(network, spike_info):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     # ops = create_network('spikeBERT', 'data/spikebert_sst2_new.pkl')
-    print_sparsity('spikeBERT', 'data/spikebert_sst2.pkl')
+    print_sparsity('spikeBERT', 'data/spikebert_mr.pkl')
     # total_ops = compute_num_OPS(ops)
     # num_adder = 128
     # frequency = 500 * 1024 * 1024
