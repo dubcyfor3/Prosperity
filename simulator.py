@@ -32,7 +32,7 @@ class Stats:
         self.num_ops = 0
         self.LIF_latency = 0
         self.preprocess_stall_cycles = 0
-        self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum', 'l_act', 'l_wgt']
+        self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum']
         self.reads = {space: 0 for space in self.mem_namespace}
         self.writes = {space: 0 for space in self.mem_namespace}
         self.original_sparsity = 0
@@ -64,7 +64,7 @@ class Accelerator:
         self.sram_size = {}
         self.sram_size['wgt'] = sram_size['wgt'] # global buffer
         self.sram_size['act'] = sram_size['act'] # global buffer
-        self.sram_size['psum'] = sram_size['psum'] # global buffer
+        self.sram_size['out'] = sram_size['out'] # global buffer
         self.adder_array_size = adder_array_size
         self.LIF_array_size = LIF_array_size
         self.bit_operation_width = 32
@@ -269,15 +269,11 @@ class Simulator:
                             stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
                             stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
 
-                    stats.reads['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    stats.writes['l_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
-                    stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
-                    stats.writes['l_act'] += cur_tile_size_M * cur_tile_size_K
                     
-                    preprocess_act, cur_cycles = self.find_reuse(cur_act)
+                    preprocess_act, cur_cycles = self.find_product_sparsity(cur_act)
                     compute_cycles += torch.sum(preprocess_act != 0).item()
-                    stats.reads['l_act'] += cur_tile_size_M * cur_tile_size_K
-                    stats.reads['l_wgt'] += torch.sum(preprocess_act != 0).item() * cur_tile_size_N * operator.weight_tensor.nbits
+                    stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
+                    stats.reads['g_wgt'] += torch.sum(preprocess_act != 0).item() * cur_tile_size_N * operator.weight_tensor.nbits
                     # find the row in preprocess_act that is all zero, if all zero originally, no cycles needed, if not, need one cycle
                     nnz_each_row = torch.sum(preprocess_act != 0, dim=-1)
                     nnz_each_row_ori = torch.sum(cur_act != 0, dim=-1)
@@ -433,21 +429,17 @@ class Simulator:
             if not spike_stored_in_buffer:
                 init_mem_access += operator.sequence_length * operator.dim_per_head * 3
                 stats.reads['dram'] += operator.act_q_tensor.sparse_map.numel() * 3
-            else:
-                stats.reads['g_act'] += operator.act_q_tensor.sparse_map.numel() * 3
-
-            stats.writes['l_act'] += operator.act_q_tensor.sparse_map.numel() * 3
 
 
             num_op = operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length
 
             stats.compute_cycles += num_op // self.accelerator.adder_array_size
-            stats.reads['l_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length * 2
-            stats.writes['l_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head
+            stats.reads['g_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length * 2
+            stats.writes['g_psum'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head
             lif = LIFNeuron('lif_attn', operator.dim_per_head * operator.num_head, operator.batch_size, operator.time_steps)
             lif_stats, _ = self.run_LIF(lif, self.accelerator.adder_array_size, 1)
             stats.compute_cycles += max(0, lif_stats.total_cycles - stats.compute_cycles)
-            stats.reads['l_act'] += num_op * self.accelerator.bit_operation_width * 2
+            stats.reads['g_act'] += num_op * self.accelerator.bit_operation_width * 2
             out_spike_stored_in_buffer = False
             if operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length < self.accelerator.sram_size['act']:
                 stats.writes['g_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length
@@ -489,7 +481,7 @@ class Simulator:
         return optimized_computation
 
     
-    def find_reuse(self, act: torch.Tensor):
+    def find_product_sparsity(self, act: torch.Tensor):
         cycles = 0
         cycles += act.shape[0] // self.accelerator.num_popcnt # do popcnt to all rows
         preprocessed_act = act.clone()
@@ -689,7 +681,7 @@ class Simulator:
 if __name__ == '__main__':
     # Adder 8 bit * 128
 
-    accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 650000, 'act': 650000, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32, tile_size_M=256, tile_size_K=16)
+    accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 16384, 'act': 4096, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32, tile_size_M=256, tile_size_K=16)
     ST_model_list = ['spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100', 'spikebert_mr', 'spikebert_sst2']
     SCNN_model_list = ['vgg16_cifar10', 'vgg16_cifar100', 'lenet5_mnist']
     stats_list = []
