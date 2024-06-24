@@ -7,6 +7,7 @@ import numpy as np
 from utils import get_density
 
 def construct_subset_DAG(spike_tensor: torch.Tensor):
+    argmax_size = 0
     shape = spike_tensor.shape
     spike_tensor = spike_tensor.reshape(-1, shape[-1])
     # create a graph with 16 nodes
@@ -33,6 +34,8 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
         is_excluded = torch.logical_and(is_equal, is_bigger_index)
         is_real_subset = torch.logical_and(is_subset, ~is_excluded)
 
+        argmax_size = max(argmax_size, torch.sum(is_real_subset).item())
+
         if torch.sum(is_real_subset) == 0:
             continue
         subset_index = torch.nonzero(is_real_subset).flatten()
@@ -58,7 +61,7 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
             g.add_edge(i.item(), m)
 
     # print("original_nnz", original_nnz, "rank_one_reduced_nnz: ", rank_one_reduced_nnz, "ideal_reduced_nnz: ", ideal_reduced_nnz)
-    return t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz
+    return t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size
 
 def visualize_dag(G, filename):
     # Check if the graph is a DAG
@@ -74,6 +77,60 @@ def visualize_dag(G, filename):
     plt.title("Directed Acyclic Graph (DAG) Visualization")
     plt.savefig('{}'.format(filename))
 
+def buffering_analysis(nn):
+    max_buffering_size = 0
+    argmax_size = 0
+    for ops in nn:
+        if isinstance(ops, Conv2D):
+            eq_fc = conv2d_2_fc(ops)
+        elif isinstance(ops, FC):
+            eq_fc = ops
+        else:
+            continue
+
+        eq_fc.activation_tensor.sparse_map = eq_fc.activation_tensor.sparse_map.reshape(eq_fc.time_steps, eq_fc.sequence_length, eq_fc.input_dim)
+        # transpose time step and sequence length
+        eq_fc.activation_tensor.sparse_map = eq_fc.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
+        input_shape = eq_fc.activation_tensor.shape
+        input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
+        input_tensor = eq_fc.activation_tensor.sparse_map.reshape(input_shape)
+
+        tile_size_M = 256
+        tile_size_N = 16
+
+        
+        for i in range(0, input_shape[0], tile_size_M):
+            for j in range(0, input_shape[1], tile_size_N):
+                tile = input_tensor[i:i+tile_size_M, j:j+tile_size_N]
+                tree, graph, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, cur_argmax_size = construct_subset_DAG(tile)
+
+                argmax_size = max(argmax_size, cur_argmax_size)
+
+                # popcnt = tile.sum(dim=1)
+                # # sort the popcnt
+                # sorted_indices = torch.argsort(popcnt, descending=False)
+                # # traverse the tree from the root
+                # for node in nx.topological_sort(tree):
+                #     tree.nodes[node]['num_children'] = len(list(tree.successors(node)))
+
+                # cur_buffered_size = 0
+                # # traverse in sorted indices
+                # for i in sorted_indices:
+                #     parent = list(tree.predecessors(i.item()))
+                #     if len(parent) == 1:
+                #         parent = parent[0]
+                #         tree.nodes[parent]['num_children'] -= 1
+                #         if tree.nodes[parent]['num_children'] == 0:
+                #             cur_buffered_size -= 1
+                #     elif len(parent) > 1:
+                #         raise ValueError("The graph is not a tree")
+                
+                #     if tree.nodes[i.item()]['num_children'] != 0:
+                #         cur_buffered_size += 1
+                #         max_buffering_size = max(max_buffering_size, cur_buffered_size)
+
+    print("argmax_size: ", argmax_size)
+    print("max_buffering_size: ", max_buffering_size)
 
 def idealistic_analysis():
     nn = create_network('spikformer', 'spikformer_cifar10.pkl')
@@ -166,9 +223,10 @@ def all_zero_analysis():
     print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
-    nn = create_network('spikformer', 'spikformer_cifar10.pkl')
-    fc = nn[10]
-    conv = nn[0]
-    whole_network_analysis(nn)
+    # nn = create_network('spikformer', 'spikformer_cifar10.pkl')
+    # fc = nn[10]
+    # conv = nn[0]
+    # whole_network_analysis(nn)
+    buffering_analysis()
 
     # idealistic_analysis()
