@@ -6,12 +6,23 @@ from collections import defaultdict
 from collections import OrderedDict
 import logging
 from typing import Union
+from sparsity_analysis import buffering_analysis
+from cacti import CactiSweep
 
 logging.basicConfig(level=logging.INFO)
 
 ori_nnzs = []
 processed_nnzs = []
 total_elements = []
+argmax_entries = 0
+
+def clear_global_stats():
+    global ori_nnzs
+    global processed_nnzs
+    global total_elements
+    ori_nnzs = []
+    processed_nnzs = []
+    total_elements = []
 
 class Stats:
     def __init__(self):
@@ -47,7 +58,7 @@ class Stats:
 
 
 class Accelerator:
-    def __init__(self, type, num_popcnt, sram_size, adder_array_size=16, LIF_array_size=32, mem_if_width=1024):
+    def __init__(self, type, num_popcnt, sram_size, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, mem_if_width=1024):
         self.type = type
         self.num_popcnt = num_popcnt
         self.sram_size = {}
@@ -58,9 +69,26 @@ class Accelerator:
         self.LIF_array_size = LIF_array_size
         self.bit_operation_width = 32
         self.bo_array_size = 4
-        self.SpMM_tile_size_M = 256
-        self.SpMM_tile_size_K = 16
+        self.SpMM_tile_size_M = tile_size_M
+        self.SpMM_tile_size_K = tile_size_K
         self.mem_if_width = mem_if_width
+        self.tech_node = 0.065
+
+    def get_sram_stats(self):
+        cacti_sweep = CactiSweep()
+        buffer_cfg = {'block size (bytes)': self.adder_array_size, 
+                            'size (bytes)': self.SpMM_tile_size_M * self.adder_array_size, 
+                            'technology (u)': self.tech_node}
+        
+        output_dict = {}
+        output_dict['area'] = cacti_sweep.get_data_clean(buffer_cfg)['area_mm^2'].values[0] * 2 # 2 for ping-pong buffer
+        output_dict['leak_power'] = cacti_sweep.get_data_clean(buffer_cfg)['leak_power_mW'].values[0] * 2
+        output_dict['read_energy'] = cacti_sweep.get_data_clean(buffer_cfg)['read_energy_nJ'].values[0]
+        output_dict['write_energy'] = cacti_sweep.get_data_clean(buffer_cfg)['write_energy_nJ'].values[0]
+
+        return output_dict
+
+
 
 class Simulator:
     def __init__(self, accelerator: Accelerator, network: list):
@@ -185,21 +213,23 @@ class Simulator:
         act_tile_size = tile_size_M * tile_size_K * 1 # spike is one bit
         wgt_tile_size = tile_size_K * tile_size_N * operator.weight_tensor.nbits
 
-        if M * K < self.accelerator.sram_size['act']:
+        if M * K <= self.accelerator.sram_size['act']:
             buffer_state_act = "store all"
-        elif act_tile_size * tile_num_K < self.accelerator.sram_size['act']:
+        elif act_tile_size * tile_num_K <= self.accelerator.sram_size['act']:
             buffer_state_act = "store row"
-        elif act_tile_size < self.accelerator.sram_size['act']:
+        elif act_tile_size <= self.accelerator.sram_size['act']:
             buffer_state_act = "store single tile"
         else:
             raise Exception("single tile cannot fit in sram act buffer")
         
-        if K * N * operator.weight_tensor.nbits < self.accelerator.sram_size['wgt']:
+        if K * N * operator.weight_tensor.nbits <= self.accelerator.sram_size['wgt']:
             buffer_state_wgt = "store all"
-        elif wgt_tile_size * tile_num_K < self.accelerator.sram_size['wgt']:
+        elif wgt_tile_size * tile_num_K <= self.accelerator.sram_size['wgt']:
             buffer_state_wgt = "store col"
-        elif wgt_tile_size < self.accelerator.sram_size['wgt']:
+        elif wgt_tile_size <= self.accelerator.sram_size['wgt']:
             buffer_state_wgt = "store single tile"
+        else:
+            raise Exception("single tile cannot fit in sram wgt buffer")
 
         # 1. load activation and weight to sram
         # 2. load activation and weight to local buffer
@@ -659,7 +689,7 @@ class Simulator:
 if __name__ == '__main__':
     # Adder 8 bit * 128
 
-    accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 131072, 'act': 262144, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32)
+    accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 650000, 'act': 650000, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32, tile_size_M=256, tile_size_K=16)
     ST_model_list = ['spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100', 'spikebert_mr', 'spikebert_sst2']
     SCNN_model_list = ['vgg16_cifar10', 'vgg16_cifar100', 'lenet5_mnist']
     stats_list = []
@@ -673,20 +703,25 @@ if __name__ == '__main__':
     if run_SCNN:
         model_list.extend(SCNN_model_list)
     if run_single_model:
-        model_list = ['sdt_cifar10dvs']
+        model_list = ['spikformer_cifar10']
 
     for name in model_list:
+        clear_global_stats()
         model_name = name.split('_')[0]
         spike_info_path = 'data/' + name + '.pkl'
         nn = create_network(model_name, spike_info_path)
-        sim = Simulator(accelerator, nn)
-        stats = sim.sim()
-        stats_list.append(stats)
+        if True:
+            sim = Simulator(accelerator, nn)
+            stats = sim.sim()
+            stats_list.append(stats)
+        if False:
+            buffering_analysis(nn)
 
-    with open('output_new.txt', 'a') as f:  # Open the file in append mode
+    with open('output_big_buffer.txt', 'a') as f:  # Open the file in append mode
         for i, stats in enumerate(stats_list):
             f.write(f"model: {model_list[i]}\n")
             f.write(f"total time: {stats.total_cycles / (500 * 1024 * 1024)}\n")
+            f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
             f.write(f"original sparsity: {stats.original_sparsity}\n")
             f.write(f"processed sparsity: {stats.processed_sparsity}\n")
             f.write("\n")
