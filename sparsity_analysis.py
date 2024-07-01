@@ -77,9 +77,14 @@ def visualize_dag(G, filename):
     plt.title("Directed Acyclic Graph (DAG) Visualization")
     plt.savefig('{}'.format(filename))
 
+def children_count(tree, node):
+    children = list(tree.successors(node))
+    return len(children)
+
 def buffering_analysis(nn):
     max_buffering_size = 0
     argmax_size = 0
+    max_children = 0
     for ops in nn:
         if isinstance(ops, Conv2D):
             eq_fc = conv2d_2_fc(ops)
@@ -105,6 +110,11 @@ def buffering_analysis(nn):
                 tree, graph, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, cur_argmax_size = construct_subset_DAG(tile)
 
                 argmax_size = max(argmax_size, cur_argmax_size)
+                children_count_list = [children_count(tree, node) for node in tree.nodes]
+                max_children = max(max_children, max(children_count_list))
+
+                # print("max_children: ", max_children)
+
 
                 # popcnt = tile.sum(dim=1)
                 # # sort the popcnt
@@ -131,6 +141,7 @@ def buffering_analysis(nn):
 
     print("argmax_size: ", argmax_size)
     print("max_buffering_size: ", max_buffering_size)
+    print("max_children: ", max_children)
 
 def idealistic_analysis():
     nn = create_network('spikformer', 'spikformer_cifar10.pkl')
@@ -223,10 +234,10 @@ def all_zero_analysis():
     print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
-    # nn = create_network('spikformer', 'spikformer_cifar10.pkl')
+    nn = create_network('spikformer', 'data/spikformer_cifar10.pkl')
     # fc = nn[10]
     # conv = nn[0]
     # whole_network_analysis(nn)
-    buffering_analysis()
 
+    buffering_analysis(nn)
     # idealistic_analysis()

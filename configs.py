@@ -14,14 +14,18 @@ def spikeBERT_config(dataset):
 
     spikeBERT_encoder = OrderedDict([
         ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('layer_norm_q', [dim, batch_size * 3, sequence_length, time_steps]),
         ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
         ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),
+        ('layer_norm_o', [dim, batch_size, sequence_length, time_steps]),
         ('lif_o', [dim * sequence_length, batch_size, time_steps]),
         ('fc_1', [dim, dim * mlp_ratio, sequence_length, batch_size, time_steps]),
+        ('layer_norm_1', [dim * mlp_ratio, batch_size, sequence_length, time_steps]),
         ('lif_1', [dim * mlp_ratio * sequence_length, batch_size, time_steps]),
         ('fc_2', [dim * mlp_ratio, dim, sequence_length, batch_size, time_steps]),
+        ('layer_norm_2', [dim, batch_size, sequence_length, time_steps]),
         ('lif_2', [dim * sequence_length, batch_size, time_steps]),
     ])
 
@@ -32,6 +36,34 @@ def spikeBERT_config(dataset):
 
     return spikeBERT
 
+def spikingBERT_config(dataset):
+    dim = 768
+    batch_size = 1
+    time_steps = 16
+    depth = 4
+    num_head = 12
+    sequence_length = 128
+    mlp_ratio = 4
+
+    spikingBERT_encoder = OrderedDict([
+        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('lif_q', [dim * sequence_length * 2, batch_size, time_steps]),
+        ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
+        ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
+        ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),
+        ('lif_o', [dim * sequence_length, batch_size, time_steps]),
+        ('fc_1', [dim, dim * mlp_ratio, sequence_length, batch_size, time_steps]),
+        ('lif_1', [dim * mlp_ratio * sequence_length, batch_size, time_steps]),
+        ('fc_2', [dim * mlp_ratio, dim, sequence_length, batch_size, time_steps]),
+        ('lif_2', [dim * sequence_length, batch_size, time_steps]),
+    ])
+
+    spikingBERT = OrderedDict()
+    for i in range(depth):
+        encoder_with_idx = OrderedDict([(key + '_enc_' + str(i), value) for key, value in spikingBERT_encoder.items()])
+        spikingBERT.update(encoder_with_idx)
+
+    return spikingBERT
 
 def spikformer_config(dataset='cifar10'):
     if dataset == 'cifar10' or dataset == 'cifar100':
@@ -137,6 +169,44 @@ def SDT_config(dataset):
                         
     return SDT
 
+def resnet18_config():
+    batch_size = 1
+    time_steps = 32
+    resnet18_config = OrderedDict([
+        ('conv2d_1', [8, 64, 64, 3, 1, 1, batch_size, time_steps]),
+        ('lif_1', [8 * 8 * 64, batch_size, time_steps]),
+        ('conv2d_2', [8, 64, 64, 3, 1, 1, batch_size, time_steps]),
+        ('lif_2', [8 * 8 * 64, batch_size, time_steps]),
+        ('conv2d_3', [8, 64, 64, 3, 1, 1, batch_size, time_steps]),
+        ('lif_3', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_4', [8, 64, 64, 3, 1, 1, batch_size, time_steps]),
+        ('lif_4', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_5', [8, 64, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_5', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_6', [8, 128, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_6', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_7', [8, 128, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_7', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_8', [8, 128, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_8', [8 * 8 * 128, batch_size, time_steps]),
+        ('conv2d_9', [8, 128, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_9', [8 * 8 * 256, batch_size, time_steps]),
+        ('conv2d_10', [8, 256, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_10', [8 * 8 * 256, batch_size, time_steps]),
+        ('conv2d_11', [8, 256, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_11', [8 * 8 * 256, batch_size, time_steps]),
+        ('conv2d_12', [8, 256, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_12', [8 * 8 * 256, batch_size, time_steps]),
+        ('conv2d_13', [8, 256, 512, 3, 1, 1, batch_size, time_steps]),
+        ('lif_13', [8 * 8 * 512, batch_size, time_steps]),
+        ('conv2d_14', [8, 512, 512, 3, 1, 1, batch_size, time_steps]),
+        ('lif_14', [8 * 8 * 512, batch_size, time_steps]),
+        ('conv2d_15', [8, 512, 512, 3, 1, 1, batch_size, time_steps]),
+        ('lif_15', [8 * 8 * 512, batch_size, time_steps]),
+        ('conv2d_16', [8, 512, 512, 3, 1, 1, batch_size, time_steps]),
+        ('lif_16', [8 * 8 * 512, batch_size, time_steps]),
+    ])
+    return resnet18_config
 
 def vgg16_config():
     batch_size = 1
