@@ -1,4 +1,4 @@
-from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, create_network, conv2d_2_fc
+from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc
 from utils import ceil_a_by_b, img2col, get_density
 import torch
 import numpy as np
@@ -67,6 +67,7 @@ class Accelerator:
         self.sram_size['out'] = sram_size['out'] # global buffer
         self.adder_array_size = adder_array_size
         self.LIF_array_size = LIF_array_size
+        self.num_sfu = 8
         self.bit_operation_width = 32
         self.bo_array_size = 4
         self.SpMM_tile_size_M = tile_size_M
@@ -145,12 +146,12 @@ class Simulator:
         for key, value in stats.items():
             total_stats += value
             # lif can be overlapped with fc and conv
-            if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('attention')):
-                last_stats_cycles = last_stats.total_cycles
-                if last_stats_cycles + value.LIF_latency >= value.total_cycles:
-                    total_stats.total_cycles += value.LIF_latency
-                else:
-                    total_stats.total_cycles += value.total_cycles - last_stats_cycles
+            if key.startswith('lif'): # and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('attention')):
+                # last_stats_cycles = last_stats.total_cycles
+                # if last_stats_cycles + value.LIF_latency >= value.total_cycles:
+                total_stats.total_cycles += value.LIF_latency
+                # else:
+                #     total_stats.total_cycles += value.total_cycles - last_stats_cycles
             else:
                 total_stats.total_cycles += value.total_cycles
             last_stats_key, last_stats = key, value
@@ -466,6 +467,43 @@ class Simulator:
 
         return stats, out_spike_stored_in_buffer
     
+    def run_layernorm(self, operator: LayerNorm):
+        stats = Stats()
+
+        M,N = np.prod(operator.activation_tensor.shape[:-1]), operator.activation_tensor.shape[-1]
+        tile_size_M = self.accelerator.SpMM_tile_size_M
+        tile_num_M = ceil_a_by_b(M, tile_size_M)
+
+        adder_cycles = 0
+        multiplier_cycles = 0
+        SFU_cycles = 0
+        for m in range(tile_num_M):
+            cur_tile_size_M = min(tile_size_M, M - m * tile_size_M)
+            adder_cycles += cur_tile_size_M * N // self.accelerator.adder_array_size # get sum
+            adder_cycles += cur_tile_size_M * N // self.accelerator.adder_array_size # minus by mean
+            adder_cycles += cur_tile_size_M * N // self.accelerator.adder_array_size # get variance
+
+        # only consider cycles for one tile since the computation is overlapped
+        SFU_cycles += tile_size_M // self.accelerator.num_sfu # divide to get mean
+        multiplier_cycles += tile_size_M * N // self.accelerator.LIF_array_size # square
+        SFU_cycles += tile_size_M // self.accelerator.num_sfu # get reciprocal of variance
+
+        stats.compute_cycles = adder_cycles + multiplier_cycles + SFU_cycles
+        stats.total_cycles = stats.compute_cycles
+
+        print(operator.name)
+        print("total cycles: ", stats.total_cycles)
+
+        return stats
+
+
+
+
+
+
+
+
+    
     def optimize_attention(self, act_k: torch.Tensor, act_v: torch.Tensor, operator: Attention, eq_sequence_length: int, eq_dim_per_head: int):
 
         act_k = act_k.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
@@ -653,7 +691,7 @@ class Simulator:
             input_tensor = input_tensor.permute(1, 2, 0).contiguous()
             output_dim = operator.output_channel
         input_length = self.StSAP(input_tensor)
-        repeate_times = ceil_a_by_b(output_dim, 2)
+        repeate_times = ceil_a_by_b(output_dim, 16)
         stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
 
         if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
@@ -688,14 +726,14 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = False
+    run_single_model = True
     model_list = []
     if run_ST:
         model_list.extend(ST_model_list)
     if run_SCNN:
         model_list.extend(SCNN_model_list)
     if run_single_model:
-        model_list = ['spikformer_cifar10']
+        model_list = ['spikebert_sst2']
 
     for name in model_list:
         clear_global_stats()
@@ -709,12 +747,12 @@ if __name__ == '__main__':
         if False:
             buffering_analysis(nn)
 
-    with open('output_big_buffer.txt', 'a') as f:  # Open the file in append mode
-        for i, stats in enumerate(stats_list):
-            f.write(f"model: {model_list[i]}\n")
-            f.write(f"total time: {stats.total_cycles / (500 * 1024 * 1024)}\n")
-            f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
-            f.write(f"original sparsity: {stats.original_sparsity}\n")
-            f.write(f"processed sparsity: {stats.processed_sparsity}\n")
-            f.write("\n")
+    # with open('output_big_buffer.txt', 'a') as f:  # Open the file in append mode
+    #     for i, stats in enumerate(stats_list):
+    #         f.write(f"model: {model_list[i]}\n")
+    #         f.write(f"total time: {stats.total_cycles / (500 * 1024 * 1024)}\n")
+    #         f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
+    #         f.write(f"original sparsity: {stats.original_sparsity}\n")
+    #         f.write(f"processed sparsity: {stats.processed_sparsity}\n")
+    #         f.write("\n")
 

@@ -108,6 +108,16 @@ class Attention:
         else:
             raise ValueError('Unknown attention type')
 
+class LayerNorm:
+    def __init__(self, name, dim, batch_size, sequence_length, time_steps):
+        self.name = name
+        self.dim = dim
+        self.batch_size = batch_size
+        self.sequence_length = sequence_length
+        self.time_steps = time_steps
+        self.activation_tensor = Tensor([batch_size, time_steps, sequence_length, dim], 'fp8', sparse=False)
+        self.output_tensor = Tensor([batch_size, time_steps, sequence_length, dim], 'fp8', sparse=False)     
+
 
 def conv2d_2_fc(operator: Conv2D) -> FC:
     eq_input_dim  = operator.kernel_size * operator.kernel_size * operator.input_channel
@@ -131,6 +141,8 @@ def create_network(name, spike_info):
         config = lenet5_config()
     elif name == 'spikebert':
         config = spikeBERT_config(dataset=dataset)
+    elif name == 'spikingbert':
+        config = spikingBERT_config(dataset=dataset)
     else:
         raise ValueError('Unknown network name')
     ops = []
@@ -145,6 +157,9 @@ def create_network(name, spike_info):
             ops.append(FC(key, *value))
         elif key.startswith('attention'):
             ops.append(Attention(key, *value, attention_type=name))
+        elif key.startswith('layernorm'):
+            ops.append(LayerNorm(key, *value))
+            
     with open(spike_info, 'rb') as f:
         sparse_act = pickle.load(f)
         for op in ops:
