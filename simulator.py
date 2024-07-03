@@ -67,13 +67,13 @@ class Accelerator:
         self.sram_size['out'] = sram_size['out'] # global buffer
         self.adder_array_size = adder_array_size
         self.LIF_array_size = LIF_array_size
-        self.num_sfu = 8
-        self.bit_operation_width = 32
-        self.bo_array_size = 4
+        self.multiplier_array_size = 32
+        self.num_exp = 8
+        self.num_div = 1
         self.SpMM_tile_size_M = tile_size_M
         self.SpMM_tile_size_K = tile_size_K
         self.mem_if_width = mem_if_width
-        self.tech_node = 0.065
+        self.tech_node = 0.028
 
     def get_sram_stats(self):
         cacti_sweep = CactiSweep()
@@ -138,6 +138,8 @@ class Simulator:
                 stats[operator.name], spike_stored_in_buffer = self.run_attention(operator, spike_stored_in_buffer)
             elif isinstance(operator, MaxPool2D):
                 stats[operator.name] = self.run_maxpool(operator)
+            elif isinstance(operator, LayerNorm):
+                stats[operator.name] = self.run_layernorm(operator)
             else:
                 raise Exception("unsupported operator")
 
@@ -146,12 +148,14 @@ class Simulator:
         for key, value in stats.items():
             total_stats += value
             # lif can be overlapped with fc and conv
-            if key.startswith('lif'): # and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('attention')):
-                # last_stats_cycles = last_stats.total_cycles
-                # if last_stats_cycles + value.LIF_latency >= value.total_cycles:
+            if key.startswith('lif') and (last_stats_key.startswith('fc') or last_stats_key.startswith('conv') or last_stats_key.startswith('layernorm')):
                 total_stats.total_cycles += value.LIF_latency
-                # else:
-                #     total_stats.total_cycles += value.total_cycles - last_stats_cycles
+                # assume time of fc and conv is larger than lif
+            elif key.startswith('lif') and last_stats_key.startswith('attention'):
+                if last_stats.total_cycles + value.LIF_latency >= value.total_cycles:
+                    total_stats.total_cycles += value.LIF_latency
+                else:
+                    total_stats.total_cycles += value.total_cycles - last_stats.total_cycles
             else:
                 total_stats.total_cycles += value.total_cycles
             last_stats_key, last_stats = key, value
@@ -175,6 +179,8 @@ class Simulator:
         cycles_conv = 0
         cycles_fc = 0
         cycles_attn = 0
+        cycles_layer_norm = 0
+        cycles_lif = 0
         for key, value in stats.items():
             if key.startswith('fc'):
                 cycles_fc += value.total_cycles
@@ -182,10 +188,16 @@ class Simulator:
                 cycles_conv += value.total_cycles
             if key.startswith('attention'):
                 cycles_attn += value.total_cycles
+            if key.startswith('layernorm'):
+                cycles_layer_norm += value.total_cycles
+            if key.startswith('lif'):
+                cycles_lif += value.LIF_latency
 
         print("conv percentage: ", cycles_conv / total_stats.total_cycles)
         print("fc percentage: ", cycles_fc / total_stats.total_cycles)
         print("attn percentage: ", cycles_attn / total_stats.total_cycles)
+        print("layer norm percentage: ", cycles_layer_norm / total_stats.total_cycles)
+        print("lif percentage: ", cycles_lif / total_stats.total_cycles)
 
         return total_stats
     
@@ -440,7 +452,7 @@ class Simulator:
             lif = LIFNeuron('lif_attn', operator.dim_per_head * operator.num_head, operator.batch_size, operator.time_steps)
             lif_stats, _ = self.run_LIF(lif, self.accelerator.adder_array_size, 1)
             stats.compute_cycles += max(0, lif_stats.total_cycles - stats.compute_cycles)
-            stats.reads['g_act'] += num_op * self.accelerator.bit_operation_width * 2
+            stats.reads['g_act'] += num_op * 2
             out_spike_stored_in_buffer = False
             if operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length < self.accelerator.sram_size['act']:
                 stats.writes['g_act'] += operator.time_steps * operator.batch_size * operator.num_head * operator.dim_per_head * operator.sequence_length
@@ -455,6 +467,59 @@ class Simulator:
             init_latency = init_mem_access // self.accelerator.mem_if_width
             stats.mem_stall_cycles = init_latency + max(0, middle_mem_access // self.accelerator.mem_if_width - stats.compute_cycles)
             stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+        elif operator.attention_type == 'spikingbert':
+            init_mem_access = 0
+            init_mem_access += operator.sequence_length * operator.dim_per_head * (8 + 1) # q is 8bits k, kv is 1 bit
+            stats.reads['dram'] += operator.act_q_tensor.sparse_map.numel() * (8 + 1 + 1)
+            stats.writes['g_act'] += operator.act_k_tensor.sparse_map.numel() + operator.act_v_tensor.sparse_map.numel()
+            stats.writes['g_wgt'] += operator.act_q_tensor.sparse_map.numel() * 8
+
+            act_k = operator.act_k_tensor.sparse_map
+            act_v = operator.act_v_tensor.sparse_map
+            act_k = act_k.reshape([operator.time_steps, operator.batch_size, operator.sequence_length, operator.num_head, operator.dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+            act_v = act_v.reshape([operator.time_steps, operator.batch_size, operator.sequence_length, operator.num_head, operator.dim_per_head]).permute(0, 1, 3, 2, 4).contiguous()
+            for t in range(operator.time_steps):
+                for b in range(operator.batch_size):
+                    for h in range(operator.num_head):
+                        cur_act_k = act_k[t, b, h, :, :]
+                        name = f"{operator.name}_t{t}_b{b}_h{h}_qk"
+                        input_dim = operator.dim_per_head
+                        output_dim = operator.sequence_length
+                        sequence_length = operator.sequence_length
+                        time_steps = 1
+                        batch_size = 1
+                        eq_fc_qk = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
+                        eq_fc_qk.activation_tensor.sparse_map = cur_act_k
+                        
+                        cur_stats_qk = self.run_fc(eq_fc_qk, True, True)
+                        qk_cycles = cur_stats_qk.total_cycles
+
+                        # softmax
+                        SFU_cycles = operator.sequence_length * operator.sequence_length // self.accelerator.num_exp # exponentiate
+                        adder_cycles = operator.sequence_length * operator.sequence_length // self.accelerator.adder_array_size # sum
+                        SFU_cycles += operator.sequence_length // self.accelerator.num_div # reciprocal
+                        multiplier_cycles = operator.sequence_length * operator.sequence_length // self.accelerator.multiplier_array_size # normalize
+
+                        softmax_cycles = SFU_cycles + multiplier_cycles
+
+                        cur_act_v = act_v[t, b, h, :, :].transpose(0, 1).contiguous()
+                        name = f"{operator.name}_t{t}_b{b}_h{h}_sv"
+                        input_dim = operator.sequence_length
+                        output_dim = operator.sequence_length
+                        sequence_length = operator.dim_per_head
+                        time_steps = 1
+                        batch_size = 1
+                        eq_fc_sv = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
+                        eq_fc_sv.activation_tensor.sparse_map = cur_act_v
+                        cur_stats_sv = self.run_fc(eq_fc_sv, True, True)
+
+                        sv_cycles = cur_stats_sv.total_cycles
+
+                        stats.compute_cycles += max(qk_cycles + sv_cycles + adder_cycles, softmax_cycles)
+
+            stats.total_cycles = stats.compute_cycles
+
 
         else:
             raise Exception("unsupported attention type")
@@ -474,6 +539,10 @@ class Simulator:
         tile_size_M = self.accelerator.SpMM_tile_size_M
         tile_num_M = ceil_a_by_b(M, tile_size_M)
 
+        stats.reads['g_act'] = operator.activation_tensor.get_size() # read out value
+        stats.writes['g_act'] = operator.activation_tensor.get_size() # write back minus by mean value
+        stats.reads['g_psum'] = operator.activation_tensor.get_size() # read out value
+        stats.writes['g_psum'] = operator.activation_tensor.get_size() # write back squared value
         adder_cycles = 0
         multiplier_cycles = 0
         SFU_cycles = 0
@@ -483,10 +552,10 @@ class Simulator:
             adder_cycles += cur_tile_size_M * N // self.accelerator.adder_array_size # minus by mean
             adder_cycles += cur_tile_size_M * N // self.accelerator.adder_array_size # get variance
 
-        # only consider cycles for one tile since the computation is overlapped
-        SFU_cycles += tile_size_M // self.accelerator.num_sfu # divide to get mean
-        multiplier_cycles += tile_size_M * N // self.accelerator.LIF_array_size # square
-        SFU_cycles += tile_size_M // self.accelerator.num_sfu # get reciprocal of variance
+        # only consider cycles for last tile since the computation is overlapped
+        SFU_cycles += tile_size_M // self.accelerator.num_div # divide to get mean
+        multiplier_cycles += tile_size_M * N // self.accelerator.multiplier_array_size # square
+        SFU_cycles += tile_size_M // self.accelerator.num_div # get reciprocal of variance
 
         stats.compute_cycles = adder_cycles + multiplier_cycles + SFU_cycles
         stats.total_cycles = stats.compute_cycles
@@ -495,13 +564,6 @@ class Simulator:
         print("total cycles: ", stats.total_cycles)
 
         return stats
-
-
-
-
-
-
-
 
     
     def optimize_attention(self, act_k: torch.Tensor, act_v: torch.Tensor, operator: Attention, eq_sequence_length: int, eq_dim_per_head: int):
@@ -641,40 +703,7 @@ class Simulator:
         processed_size = cur_size + torch.sum(all_nonzero_row)
         return processed_size.item()
 
-    # def run_conv2d_PTB(self, operator: Conv2D):
-    #     stats = Stats()
-    #     time_window_size = 4
-    #     input_shape = operator.activation_tensor.sparse_map.shape
-    #     new_shape = [-1, time_window_size]
-    #     new_shape.extend(input_shape[1:])
-    #     input_tensor = operator.activation_tensor.sparse_map.reshape(new_shape)
-    #     input_tensor = input_tensor.sum(dim=1)
-    #     unrolled_tensor = img2col(input_tensor, operator.kernel_size, operator.stride, operator.padding)
-    #     unrolled_tensor = unrolled_tensor.permute(1, 2, 0).contiguous()
-    #     processed_size = self.StSAP(unrolled_tensor)
-    #     input_length = processed_size
-    #     repeate_times = ceil_a_by_b(operator.output_channel, 16)
-    #     stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
 
-    #     if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
-    #         stats.reads['dram'] += operator.activation_tensor.get_size() * repeate_times
-    #     else:
-    #         stats.reads['dram'] += operator.activation_tensor.get_size()
-    #     stats.reads['dram'] += operator.weight_tensor.get_size()
-    #     stats.writes['dram'] += operator.output_tensor.get_size() // 8
-
-    #     init_mem_access = 16 * 8 * (8 + 4)
-    #     total_mem_access = stats.reads['dram'] + stats.writes['dram']
-    #     middle_mem_access = total_mem_access - init_mem_access
-    #     init_latency = init_mem_access // self.accelerator.mem_if_width
-    #     middle_latency = middle_mem_access // self.accelerator.mem_if_width
-    #     stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
-    #     stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
-
-    #     print(operator.name)
-    #     print("total cycles: ", stats.total_cycles)
-    #     return stats
-    
     def run_PTB_convfc(self, operator: Union[FC, Conv2D]):
         stats = Stats()
         time_window_size = 4
@@ -690,7 +719,10 @@ class Simulator:
             input_tensor = img2col(input_tensor, operator.kernel_size, operator.stride, operator.padding)
             input_tensor = input_tensor.permute(1, 2, 0).contiguous()
             output_dim = operator.output_channel
-        input_length = self.StSAP(input_tensor)
+        if True:
+            input_length = self.StSAP(input_tensor)
+        else:
+            input_length = np.prod(input_tensor.shape[:-1])
         repeate_times = ceil_a_by_b(output_dim, 16)
         stats.compute_cycles += input_length * repeate_times * (time_window_size + 2) # one stage for leak and one stage for spike generate
 
@@ -733,15 +765,19 @@ if __name__ == '__main__':
     if run_SCNN:
         model_list.extend(SCNN_model_list)
     if run_single_model:
-        model_list = ['spikebert_sst2']
+        model_list = ['spikingbert_sst2']
 
     for name in model_list:
         clear_global_stats()
         model_name = name.split('_')[0]
         spike_info_path = 'data/' + name + '.pkl'
         nn = create_network(model_name, spike_info_path)
+
+        # layer = nn[2]
         if True:
             sim = Simulator(accelerator, nn)
+            # sim.run_attention(layer)
+            # raise Exception("stop")
             stats = sim.sim()
             stats_list.append(stats)
         if False:
