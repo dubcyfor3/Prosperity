@@ -105,6 +105,9 @@ class Attention:
         elif attention_type == 'sdt':
             self.kv_out_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
             self.output_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'spike', sparse=True)
+        elif attention_type == 'spikingbert':
+            self.attn_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, sequence_length], 'fp8', sparse=False)
+            self.output_tensor = Tensor([batch_size, time_steps, num_head, sequence_length, dim // num_head], 'fp8', sparse=False)
         else:
             raise ValueError('Unknown attention type')
 
@@ -159,14 +162,15 @@ def create_network(name, spike_info):
             ops.append(Attention(key, *value, attention_type=name))
         elif key.startswith('layernorm'):
             ops.append(LayerNorm(key, *value))
-            
+
     with open(spike_info, 'rb') as f:
         sparse_act = pickle.load(f)
         for op in ops:
             if isinstance(op, Attention):
-                op.act_q_tensor.sparse_map = sparse_act[op.name + '_q'].contiguous()
                 op.act_k_tensor.sparse_map = sparse_act[op.name + '_k'].contiguous()
                 op.act_v_tensor.sparse_map = sparse_act[op.name + '_v'].contiguous()
+                if name != 'spikingbert':
+                    op.act_q_tensor.sparse_map = sparse_act[op.name + '_q'].contiguous()
             elif isinstance(op, Conv2D) or isinstance(op, FC):
                 if op.name in sparse_act:
                     op.activation_tensor.sparse_map = sparse_act[op.name].contiguous()

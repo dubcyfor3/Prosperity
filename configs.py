@@ -7,25 +7,27 @@ def spikeBERT_config(dataset):
     depth = 12
     num_head = 8
     mlp_ratio = 4
-    if dataset == 'sst2':
+    if dataset == 'sst2' or dataset == 'sst5':
         sequence_length = 128
     elif dataset == 'mr':
         sequence_length = 256
+    else:
+        raise ValueError('Unknown dataset')
 
     spikeBERT_encoder = OrderedDict([
         ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
-        ('layer_norm_q', [dim, batch_size * 3, sequence_length, time_steps]),
+        ('layernorm_q', [dim, batch_size * 3, sequence_length, time_steps]),
         ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
         ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),
-        ('layer_norm_o', [dim, batch_size, sequence_length, time_steps]),
+        ('layernorm_o', [dim, batch_size, sequence_length, time_steps]),
         ('lif_o', [dim * sequence_length, batch_size, time_steps]),
         ('fc_1', [dim, dim * mlp_ratio, sequence_length, batch_size, time_steps]),
-        ('layer_norm_1', [dim * mlp_ratio, batch_size, sequence_length, time_steps]),
+        ('layernorm_1', [dim * mlp_ratio, batch_size, sequence_length, time_steps]),
         ('lif_1', [dim * mlp_ratio * sequence_length, batch_size, time_steps]),
         ('fc_2', [dim * mlp_ratio, dim, sequence_length, batch_size, time_steps]),
-        ('layer_norm_2', [dim, batch_size, sequence_length, time_steps]),
+        ('layernorm_2', [dim, batch_size, sequence_length, time_steps]),
         ('lif_2', [dim * sequence_length, batch_size, time_steps]),
     ])
 
@@ -46,15 +48,17 @@ def spikingBERT_config(dataset):
     mlp_ratio = 4
 
     spikingBERT_encoder = OrderedDict([
-        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
-        ('lif_q', [dim * sequence_length * 2, batch_size, time_steps]),
+        ('fc_qkv', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('lif_kv', [dim * sequence_length * 2, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
         ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),
+        ('layernorm_o', [dim, batch_size, sequence_length, time_steps]),
         ('lif_o', [dim * sequence_length, batch_size, time_steps]),
         ('fc_1', [dim, dim * mlp_ratio, sequence_length, batch_size, time_steps]),
         ('lif_1', [dim * mlp_ratio * sequence_length, batch_size, time_steps]),
         ('fc_2', [dim * mlp_ratio, dim, sequence_length, batch_size, time_steps]),
+        ('layernorm_2', [dim, batch_size, sequence_length, time_steps]),
         ('lif_2', [dim * sequence_length, batch_size, time_steps]),
     ])
 
