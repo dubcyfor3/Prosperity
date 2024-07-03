@@ -133,7 +133,7 @@ if __name__ == "__main__":
     cache_sweep_data = CactiSweep()
 
     print('*'*50)
-    tech_node = 0.065
+    tech_node = 0.028
     print('Eyeriss @ {:1.0f}nm'.format(tech_node*1.e3))
     cfg_dict = {'block size (bytes)': 128, 'size (bytes)': 128 * 256, 'technology (u)': tech_node}
     eyeriss_read_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ'])
