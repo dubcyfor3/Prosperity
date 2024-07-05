@@ -10,6 +10,7 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
     argmax_size = 0
     shape = spike_tensor.shape
     spike_tensor = spike_tensor.reshape(-1, shape[-1])
+    new_tensor = spike_tensor.clone()
     # create a graph with 16 nodes
     t = nx.DiGraph()
     t.add_nodes_from(range(spike_tensor.shape[0]))
@@ -42,8 +43,9 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
         subset_size = torch.sum(spike_tensor[is_real_subset], dim=-1)
         max_subset_size, max_subset_index = torch.max(subset_size, dim=-1)
         
-        if max_subset_size.item() >= 2:
+        if max_subset_size.item() >= 1:
             t.add_edge(subset_index[max_subset_index].item(), m)
+            new_tensor[m] = torch.logical_xor(new_tensor[m], spike_tensor[subset_index[max_subset_index]])
             if cur_nnz == max_subset_size.item():
                 rank_one_reduced_nnz -= max_subset_size.item() - 1
             else:
@@ -61,7 +63,7 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
             g.add_edge(i.item(), m)
 
     # print("original_nnz", original_nnz, "rank_one_reduced_nnz: ", rank_one_reduced_nnz, "ideal_reduced_nnz: ", ideal_reduced_nnz)
-    return t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size
+    return t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size, new_tensor
 
 def visualize_dag(G, filename):
     # Check if the graph is a DAG
@@ -76,6 +78,27 @@ def visualize_dag(G, filename):
     nx.draw(G, pos, with_labels=True, node_size=700, node_color='skyblue', font_size=15, font_weight='bold', arrowstyle='-|>', arrowsize=15)
     plt.title("Directed Acyclic Graph (DAG) Visualization")
     plt.savefig('{}'.format(filename))
+
+def visualize_matrix(matrix:torch.Tensor, filename):
+    matrix = matrix.to(torch.int32)
+    with open(filename, 'w') as f:
+        for i in range(matrix.shape[0]):
+            f.write(str(i).zfill(3) + ' ')
+            for j in range(matrix.shape[1]):
+                f.write(str(matrix[i, j].item()) + ' ')
+            f.write('\n')
+
+def visualize_matrix_with_parent(matrix:torch.Tensor, parents:torch.Tensor, filename):
+    matrix = matrix.to(torch.int32)
+    with open(filename, 'w') as f:
+        for i in range(matrix.shape[0]):
+            # make every i has same length
+            f.write(str(i).zfill(3) + ' ')
+            for j in range(matrix.shape[1]):
+                f.write(str(matrix[i, j].item()) + ' ')
+            f.write(str(parents[i].item()) + ' ')
+            f.write('\n')
+
 
 def children_count(tree, node):
     children = list(tree.successors(node))
@@ -235,9 +258,17 @@ def all_zero_analysis():
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
     nn = create_network('spikformer', 'data/spikformer_cifar10.pkl')
-    # fc = nn[10]
+    fc = nn[10]
+    mat = fc.activation_tensor.sparse_map
+    mat = mat.reshape(-1, mat.shape[-1])
+    mat = mat[0:256, 0:16]
+    
+    t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size, new_act = construct_subset_DAG(mat)
+    parents = torch.tensor([list(t.predecessors(node))[0] if len(list(t.predecessors(node))) > 0 else -1 for node in t.nodes])
+    visualize_matrix_with_parent(mat, parents, 'matrix.txt')
+    visualize_matrix(new_act, 'new_matrix.txt')
     # conv = nn[0]
     # whole_network_analysis(nn)
 
-    buffering_analysis(nn)
+    # buffering_analysis(nn)
     # idealistic_analysis()
