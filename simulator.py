@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections import OrderedDict
 import logging
 from typing import Union
-from sparsity_analysis import buffering_analysis
 from cacti import CactiSweep
 
 logging.basicConfig(level=logging.INFO)
@@ -96,6 +95,7 @@ class Simulator:
         self.accelerator = accelerator
         self.network = network
         self.track_sparsity_increment = True
+        self.device = 'cpu'
 
     def sim(self):
         if self.accelerator.type == 'PTB':
@@ -206,6 +206,8 @@ class Simulator:
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
         assert operator.time_steps * operator.sequence_length * operator.input_dim == operator.activation_tensor.sparse_map.numel()
         # reshape activation tensor
+        # to device
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.to(self.device)
         operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.reshape(operator.time_steps, operator.sequence_length, operator.input_dim)
         # transpose time step and sequence length
         operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
@@ -597,12 +599,12 @@ class Simulator:
 
             equalities = torch.eq(cur_row, act)
             is_equal = torch.all(equalities, dim=-1)
-            is_bigger_index = torch.arange(act.shape[0]) >= i
+            is_bigger_index = torch.arange(act.shape[0], device=self.device) >= i
 
             is_excluded = torch.logical_and(is_equal, is_bigger_index)
             is_real_subset = torch.logical_and(is_subset, ~is_excluded)
 
-            cycles += 1 # find all subset of this row in CAM
+            cycles += 1 # pipelined
             # find the largest subset through look up the popcnt result
 
             if torch.sum(is_real_subset) == 0:
@@ -620,7 +622,6 @@ class Simulator:
                 # cycles += 1 # search the next begin point in CAM
 
         return preprocessed_act, cycles
-
     
     def find_largest_subset(self, operator: FC):
         input_shape = operator.activation_tensor.shape
@@ -752,20 +753,20 @@ if __name__ == '__main__':
     # Adder 8 bit * 128
 
     accelerator = Accelerator(type='ST', num_popcnt=8, sram_size={'wgt': 16384, 'act': 4096, 'psum': 64, 'out': 64}, adder_array_size=128, LIF_array_size=32, tile_size_M=256, tile_size_K=16)
-    ST_model_list = ['spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100', 'spikebert_mr', 'spikebert_sst2']
+    ST_model_list = ['spikebert_mr', 'spikebert_sst2', 'spikebert_sst5', 'spikingbert_sst2', 'spikingbert_qqp', 'spikingbert_mnli', 'spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100']
     SCNN_model_list = ['vgg16_cifar10', 'vgg16_cifar100', 'lenet5_mnist']
     stats_list = []
 
     run_ST = True
     run_SCNN = True
-    run_single_model = True
+    run_single_model = False
     model_list = []
     if run_ST:
         model_list.extend(ST_model_list)
     if run_SCNN:
         model_list.extend(SCNN_model_list)
     if run_single_model:
-        model_list = ['spikingbert_sst2']
+        model_list = ['spikformer_cifar10']
 
     for name in model_list:
         clear_global_stats()
@@ -780,15 +781,13 @@ if __name__ == '__main__':
             # raise Exception("stop")
             stats = sim.sim()
             stats_list.append(stats)
-        if False:
-            buffering_analysis(nn)
 
-    # with open('output_big_buffer.txt', 'a') as f:  # Open the file in append mode
-    #     for i, stats in enumerate(stats_list):
-    #         f.write(f"model: {model_list[i]}\n")
-    #         f.write(f"total time: {stats.total_cycles / (500 * 1024 * 1024)}\n")
-    #         f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
-    #         f.write(f"original sparsity: {stats.original_sparsity}\n")
-    #         f.write(f"processed sparsity: {stats.processed_sparsity}\n")
-    #         f.write("\n")
+    with open('exp_M256_K16.txt', 'a') as f:  # Open the file in append mode
+        for i, stats in enumerate(stats_list):
+            f.write(f"model: {model_list[i]}\n")
+            f.write(f"total time: {stats.total_cycles / (500 * 1000 * 1000)}\n")
+            f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
+            f.write(f"original sparsity: {stats.original_sparsity}\n")
+            f.write(f"processed sparsity: {stats.processed_sparsity}\n")
+            f.write("\n")
 
