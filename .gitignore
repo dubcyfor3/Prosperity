@@ -1,5 +1,6 @@
 # my custom gitignore file
 trash_can/
+output/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
