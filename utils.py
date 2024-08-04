@@ -32,6 +32,28 @@ def img2col(input_tensor, kernel_size, stride=1, padding=0):
     output = patches.permute(0, 2, 3, 1, 4, 5).reshape(input_tensor.shape[0], -1, kernel_size*kernel_size*input_tensor.shape[1])
     return output
 
+def pad_to_power_of_2(tensor, dim):
+    """
+    Pad a specific dimension of a tensor to make it a multiple of the nearest power of 2.
+    
+    Args:
+    tensor (torch.Tensor): Input tensor
+    dim (int): Dimension to pad
+    
+    Returns:
+    torch.Tensor: Padded tensor
+    """
+    size = tensor.size(dim)
+    nearest_power_of_2 = 2 ** math.ceil(math.log2(size))
+    pad_size = nearest_power_of_2 - size
+    
+    if pad_size == 0:
+        return tensor
+    
+    pad_shape = [0] * (2 * tensor.dim())
+    pad_shape[-2 * dim - 1] = pad_size
+    
+    return torch.nn.functional.pad(tensor, pad_shape)
 
 if __name__ == '__main__':
     # create a tensor of shape [4, 48, 32, 32]
