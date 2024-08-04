@@ -7,6 +7,8 @@ from configs import *
 
 def compute_num_OPS(nn):
     total_ops = 0
+    FC_ops = 0
+    LIF_ops = 0
     for op in nn:
         if isinstance(op, FC):
             M = op.batch_size * op.time_steps * op.sequence_length
@@ -14,6 +16,7 @@ def compute_num_OPS(nn):
             N = op.output_dim
             density = get_density(op.activation_tensor.sparse_map)
             total_ops += int(M * K * N * density)
+            FC_ops += int(M * K * N * density)
         elif isinstance(op, Conv2D):
             eq_op = conv2d_2_fc(op)
             M = eq_op.batch_size * eq_op.time_steps * eq_op.sequence_length
@@ -21,8 +24,20 @@ def compute_num_OPS(nn):
             N = eq_op.output_dim
             density = get_density(eq_op.activation_tensor.sparse_map)
             total_ops += int(M * K * N * density)
+            FC_ops += int(M * K * N * density)
+        elif isinstance(op, LIFNeuron):
+            total_ops += op.batch_size * op.time_steps * op.num_neuron
+            LIF_ops += op.batch_size * op.time_steps * op.num_neuron
+        elif isinstance(op, LayerNorm):
+            total_ops += op.batch_size * op.time_steps * op.sequence_length * op.dim * 2
+        elif isinstance(op, Attention):
+            if op.attention_type == 'spikingbert':
+                total_ops += op.batch_size * op.time_steps * op.num_head * op.sequence_length * op.sequence_length * op.dim_per_head * 2
+                total_ops += op.batch_size * op.time_steps * op.num_head * op.sequence_length * op.sequence_length * 2
+            else:
+                raise ValueError('not implemented attention type')
     
-    return total_ops
+    return total_ops, FC_ops, LIF_ops
 
 class Tensor:
     def __init__(self, shape, dtype, sparse=False):
@@ -140,8 +155,12 @@ def create_network(name, spike_info):
         config = SDT_config(dataset=dataset)
     elif name == 'vgg16':
         config = vgg16_config()
+    elif name == 'vgg9':
+        config = vgg9_config(dataset=dataset)
     elif name == 'lenet5':
         config = lenet5_config()
+    elif name == 'resnet18':
+        config = resnet18_config()
     elif name == 'spikebert':
         config = spikeBERT_config(dataset=dataset)
     elif name == 'spikingbert':
@@ -202,8 +221,13 @@ def print_sparsity(network, spike_info):
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    # ops = create_network('spikeBERT', 'data/spikebert_sst2_new.pkl')
-    print_sparsity('spikeBERT', 'data/spikebert_mr.pkl')
+    nn = create_network('spikingbert', 'data/spikingbert_sst2.pkl')
+    ops, fc_ops, lif_ops = compute_num_OPS(nn)
+    print("Total number of operations: ", ops)
+    print("FC operations: ", fc_ops)
+    print("LIF operations: ", lif_ops)
+    # print_sparsity('spikeBERT', 'data/vgg16_cifar100.pkl')
+
     # total_ops = compute_num_OPS(ops)
     # num_adder = 128
     # frequency = 500 * 1024 * 1024
