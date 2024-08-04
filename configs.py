@@ -141,6 +141,9 @@ def SDT_config(dataset):
         mlp_ratio = 4
         image_size = [64, 32, 16, 8]
         sequence_length = image_size[-1] * image_size[-1]
+    else:
+        print(dataset)
+        raise ValueError('Unknown dataset')
 
         
     SDT_sps = OrderedDict([('conv2d_1', [image_size[0], dim // 8, dim // 4, 3, 1, 1, batch_size, time_steps]),
@@ -250,6 +253,33 @@ def vgg16_config():
         # ('lif_15', [10, batch_size, time_steps]),
     ])
     return vgg16
+
+def vgg9_config(dataset):
+    batch_size = 1
+    time_steps = 4
+    if dataset == 'cifar10dvs':
+        init_shape = 128
+    else:
+        init_shape = 32
+    img_size = [init_shape, init_shape // 2, init_shape // 2, init_shape // 4, init_shape // 4, init_shape // 8]
+    vgg9 = OrderedDict([
+        ('conv2d_1', [img_size[0], 64, 64, 3, 1, 1, batch_size, time_steps]),
+        ('lif_1', [img_size[0] * init_shape * 64, batch_size, time_steps]),
+        ('maxpool2d_1', [img_size[0], 64, 2, 1, 2, batch_size, time_steps]),
+        ('conv2d_2', [img_size[1], 64, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_2', [img_size[1] * img_size[1] * 128, batch_size, time_steps]),
+        ('conv2d_3', [img_size[2], 128, 128, 3, 1, 1, batch_size, time_steps]),
+        ('lif_3', [img_size[2] * img_size[2] * 128, batch_size, time_steps]),
+        ('maxpool2d_2', [img_size[2], 128, 2, 1, 2, batch_size, time_steps]),
+        ('conv2d_4', [img_size[3], 128, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_4', [img_size[3] * img_size[3] * 256, batch_size, time_steps]),
+        ('conv2d_5', [img_size[4], 256, 256, 3, 1, 1, batch_size, time_steps]),
+        ('lif_5', [img_size[4] * img_size[4] * 256, batch_size, time_steps]),
+        ('maxpool2d_3', [img_size[4], 256, 2, 1, 2, batch_size, time_steps]),
+        ('fc_0', [img_size[5] * img_size[5] * 256, 1024, 1, batch_size, time_steps]),
+        ('lif_6', [4096, batch_size, time_steps])
+    ])
+    return vgg9
 
 def lenet5_config():
     batch_size = 1
