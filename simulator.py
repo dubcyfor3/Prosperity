@@ -77,9 +77,9 @@ class Stats:
 
 
 class Accelerator:
-    def __init__(self, type, num_popcnt, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, product_sparsity=True, dense=False, tree_manage_type=2, mem_if_width=1024):
+    def __init__(self, type, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, product_sparsity=True, dense=False, tree_manage_type=2, mem_if_width=1024):
         self.type = type
-        self.num_popcnt = num_popcnt
+        self.num_popcnt = 8
         self.adder_array_size = adder_array_size  # tile size N
         self.LIF_array_size = LIF_array_size
         self.multiplier_array_size = 32
@@ -690,20 +690,6 @@ class Simulator:
 
         return stats
 
-    
-    def optimize_attention(self, act_k: torch.Tensor, act_v: torch.Tensor, operator: Attention, eq_sequence_length: int, eq_dim_per_head: int):
-
-        act_k = act_k.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
-        act_v = act_v.reshape([operator.time_steps, operator.batch_size, eq_sequence_length, operator.num_head, eq_dim_per_head]).permute(0, 1, 3, 4, 2).contiguous()
-        act_k = act_k.reshape(act_k.shape[0], act_k.shape[1], act_k.shape[2], act_k.shape[3], -1, self.accelerator.bit_operation_width)
-        act_v = act_v.reshape(act_v.shape[0], act_v.shape[1], act_v.shape[2], act_v.shape[3], -1, self.accelerator.bit_operation_width)
-        k_row_nnz = torch.sum(act_k != 0, dim=-1).permute(0, 1, 2, 4, 3)
-        v_row_nnz = torch.sum(act_v != 0, dim=-1).permute(0, 1, 2, 4, 3)
-        k_nonzero_row = torch.sum(k_row_nnz != 0, dim=-1)
-        v_nonzero_row = torch.sum(v_row_nnz != 0, dim=-1)
-
-        optimized_computation = torch.sum(k_nonzero_row * v_nonzero_row).item()
-        return optimized_computation
 
     def find_rank_two_product_sparsity(self, act: torch.Tensor):
         preprocessed_act = act.clone()
@@ -768,10 +754,8 @@ class Simulator:
     
     def find_product_sparsity(self, act: torch.Tensor):
         cycles = 0
-        # if self.accelerator.tree_manage_type != 1:
-        #     cycles += act.shape[0] // self.accelerator.num_popcnt
-        # else:
-        cycles += act.shape[0] * act.shape[1] // self.accelerator.mem_if_width # assume enough popcnt unit that match the bandwidth of memory
+
+        cycles += act.shape[0] // self.accelerator.num_popcnt
 
         num_prefix = 0
         preprocessed_act = act.clone()
@@ -1043,7 +1027,6 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Simulator')
     parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
-    parser.add_argument('--num_popcnt', type=int, default=8, help='number of popcnt')
     parser.add_argument('--adder_array_size', type=int, default=128, help='size of adder array')
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
@@ -1059,7 +1042,6 @@ if __name__ == '__main__':
     # Adder 8 bit * 128
 
     accelerator = Accelerator(type=args.type, 
-                              num_popcnt=args.num_popcnt, 
                               adder_array_size=args.adder_array_size, 
                               LIF_array_size=args.LIF_array_size, 
                               tile_size_M=args.tile_size_M, 
@@ -1080,16 +1062,16 @@ if __name__ == '__main__':
                        ]
     stats_list = []
 
-    run_ST = True
-    run_SCNN = True
-    run_single_model = False
+    run_ST = False
+    run_SCNN = False
+    run_single_model = True
     model_list = ['lenet5_mnist'] # test set
     if run_ST:
         model_list.extend(ST_model_list)
     if run_SCNN:
         model_list.extend(SCNN_model_list)
     if run_single_model:
-        model_list = ['vgg16_cifar100',]
+        model_list = ['spikformer_cifar100',]
 
     for name in model_list:
         clear_global_stats()
@@ -1108,10 +1090,11 @@ if __name__ == '__main__':
                                  'SCNN' if not run_single_model and run_SCNN else None, 
                                  args.tile_size_M if args.type == 'Prosperity' else None, 
                                  args.tile_size_K if args.type == 'Prosperity' else None, 
-                                 model_list[0] if run_single_model else None, args.tree_type,
+                                 model_list[0] if run_single_model else None, 
+                                 args.tree_type,
                                  "PS" if not args.without_product_sparsity else "no_PS"]
         filename = '_'.join([str(e) for e in filename_element_list if e is not None])
-        file_name = os.path.join(args.output_dir, filename + '_act{}_wgt_{}.txt'.format(sim.accelerator.sram_size['act'], sim.accelerator.sram_size['wgt']))
+        file_name = os.path.join(args.output_dir, filename + '.txt')
 
         with open(file_name, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
