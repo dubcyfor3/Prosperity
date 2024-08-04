@@ -135,7 +135,9 @@ if __name__ == "__main__":
     print('*'*50)
     tech_node = 0.028
     print('Eyeriss @ {:1.0f}nm'.format(tech_node*1.e3))
-    cfg_dict = {'block size (bytes)': 128, 'size (bytes)': 128 * 256, 'technology (u)': tech_node}
+    block_size = 128
+    cache_size = 32768
+    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': cache_size, 'technology (u)': tech_node}
     eyeriss_read_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ'])
     eyeriss_write_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ'])
     eyeriss_avg_energy = (eyeriss_read_energy + eyeriss_write_energy) / 2.
@@ -143,8 +145,8 @@ if __name__ == "__main__":
     eyeriss_leak_power = float(cache_sweep_data.get_data_clean(cfg_dict)['leak_power_mW'])
     print('area: {} mm^2'.format(eyeriss_area))
     print('leakage power: {} mWatt'.format(eyeriss_leak_power))
-    print('read energy per bit: {} nJ'.format(eyeriss_read_energy))
-    print('write energy per bit: {} nJ'.format(eyeriss_write_energy))
-    print('avg energy per bit: {} nJ'.format(eyeriss_avg_energy))
+    print('read energy per bit: {} nJ'.format(eyeriss_read_energy / (block_size * 8)))
+    print('write energy per bit: {} nJ'.format(eyeriss_write_energy / (block_size * 8)))
+    print('avg energy per bit: {} nJ'.format(eyeriss_avg_energy / (block_size * 8)))
 
     cache_sweep_data.update_csv()
