@@ -4,7 +4,82 @@ import matplotlib.pyplot as plt
 
 import networkx as nx
 import numpy as np
-from utils import get_density
+from utils import get_density, ceil_a_by_b
+
+import seaborn as sns
+
+def product_sparsify_whole_matrix(self, input_tensor: torch.Tensor):
+    input_tensor = input_tensor.reshape(-1, input_tensor.shape[-1])
+    tile_size_k = 16
+    tile_size_m = 256
+    sparsified_tensor = torch.zeros_like(input_tensor)
+
+    print("sparsity: ", get_density(input_tensor))
+
+    for m_id in range(0, input_tensor.shape[0], tile_size_m):
+        for k_id in range(0, input_tensor.shape[1], tile_size_k):
+            
+            cur_tile_size_m = min(tile_size_m, input_tensor.shape[0] - m_id)
+            cur_tile_siz_k = min(tile_size_k, input_tensor.shape[1] - k_id)
+            
+            tile = input_tensor[m_id:m_id+cur_tile_size_m, k_id:k_id+cur_tile_siz_k]
+
+            sparsified_tile = tile.clone()
+            for i in range(tile.shape[0]):
+                cur_row = tile[i]
+                nnz = torch.sum(cur_row != 0).item()
+                if nnz < 2:
+                    continue
+
+                and_result = torch.logical_and(cur_row, tile)
+                equalities = torch.eq(and_result, tile)
+                is_subset = torch.all(equalities, dim=-1)
+
+                equalities = torch.eq(cur_row, tile)
+                is_equal = torch.all(equalities, dim=-1)
+                is_bigger_index = torch.arange(tile.shape[0]) >= i
+
+                is_excluded = torch.logical_and(is_equal, is_bigger_index)
+                is_real_subset = torch.logical_and(is_subset, ~is_excluded)
+
+                if torch.sum(is_real_subset) == 0:
+                    continue
+
+
+                subset_row = tile[is_real_subset]
+                subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
+                max_subset_size = torch.max(subset_row_nnz).item()
+                max_subset = subset_row[torch.argmax(subset_row_nnz)]
+                # if max_subset_size > 1: # can also reuse even when the size is 1
+                sparsified_tile[i] = torch.logical_xor(sparsified_tile[i], max_subset)
+
+            sparsified_tensor[m_id:m_id+cur_tile_size_m, k_id:k_id+cur_tile_siz_k] = sparsified_tile
+
+        print("sparsity: ", get_density(sparsified_tensor))
+        return sparsified_tensor
+
+def plot_matrix(matrix: torch.Tensor, filename):
+
+    # use seaborn plot
+    cmap = plt.cm.colors.ListedColormap(["white", "#ADD8E6"])
+
+    # Define the bounds and normalization for the colors
+    bounds = [0, 0.5, 1]
+    norm = plt.cm.colors.BoundaryNorm(bounds, cmap.N)
+
+    # save the matrix
+    plt.imshow(matrix, cmap=cmap, norm=norm, aspect='equal')
+
+
+    # Add a grid with thin lines
+    plt.grid(which='major', color='black', linestyle='-', linewidth=0.5)
+
+    # Turn off the axis labels
+    plt.xticks([])
+    plt.yticks([])
+    # store as pdf and transparent
+    plt.savefig('{}'.format(filename), transparent=True)
+    return
 
 def construct_subset_DAG(spike_tensor: torch.Tensor):
     argmax_size = 0
@@ -18,7 +93,11 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
     g.add_nodes_from(range(spike_tensor.shape[0]))
     original_nnz = torch.sum(spike_tensor).item()
     rank_one_reduced_nnz = original_nnz
+    rank_two_reduced_nnz = original_nnz
     ideal_reduced_nnz = original_nnz
+    rank_one_util = 0
+    rank_two_util = 0
+    ideal_util = 0
     for m in range(spike_tensor.shape[0]):
         cur_row = spike_tensor[m]
         cur_nnz = torch.sum(cur_row).item()
@@ -41,29 +120,62 @@ def construct_subset_DAG(spike_tensor: torch.Tensor):
             continue
         subset_index = torch.nonzero(is_real_subset).flatten()
         subset_size = torch.sum(spike_tensor[is_real_subset], dim=-1)
+        subset_rows = spike_tensor[is_real_subset]
         max_subset_size, max_subset_index = torch.max(subset_size, dim=-1)
         
-        if max_subset_size.item() >= 1:
-            t.add_edge(subset_index[max_subset_index].item(), m)
-            new_tensor[m] = torch.logical_xor(new_tensor[m], spike_tensor[subset_index[max_subset_index]])
-            if cur_nnz == max_subset_size.item():
-                rank_one_reduced_nnz -= max_subset_size.item() - 1
-            else:
-                rank_one_reduced_nnz -= max_subset_size.item()
-            if cur_nnz - max_subset_size.item() == 0:
-                ideal_reduced_nnz -= max_subset_size.item() - 1
-            elif cur_nnz - max_subset_size.item() == 1:
-                ideal_reduced_nnz -= max_subset_size.item()
-            else:
-                ideal_reduced_nnz -= cur_row.sum().item() - 2
+        if max_subset_size.item() < 1:
+            continue
+        t.add_edge(subset_index[max_subset_index].item(), m)
+        new_tensor[m] = torch.logical_xor(new_tensor[m], spike_tensor[subset_index[max_subset_index]])
+        rank_one_reduced_nnz -= max_subset_size.item()
+        if torch.sum(is_real_subset).item() > 1:
+            ideal_reduced_nnz -= cur_nnz
+        else:
+            ideal_reduced_nnz -= max_subset_size.item()
+        rank_one_util += 1
+        if max_subset_size.item() == cur_nnz or torch.sum(is_real_subset).item() == 1:
+            ideal_util += 1
+        else:
+            ideal_util += 2
+
+        maximum_size = max_subset_size.item()
+        if max_subset_size.item() != cur_nnz:
+            for i in range(subset_rows.shape[0]):
+                if maximum_size == cur_nnz:
+                    break
+                cur_subset_row = subset_rows[i]
+                if torch.sum(cur_subset_row) < 1:
+                    continue
+                # perform and with every row in the subset
+                and_result = torch.logical_and(cur_subset_row, subset_rows)
+                and_sum = torch.sum(and_result, dim=-1)
+                for j in range(and_sum.shape[0]):
+                    if and_sum[j].item() == 0:
+                        maximum_size = max(maximum_size, torch.sum(cur_subset_row).item() + torch.sum(subset_rows[j]).item())
+
+        
+        rank_two_reduced_nnz -= maximum_size
+        if maximum_size > max_subset_size.item():
+            rank_two_util += 2
+        else:
+            rank_two_util += 1
+
+
+
 
         for i in subset_index:
-            if spike_tensor[i].sum() < 2:
+            if spike_tensor[i].sum() < 1:
                 continue
             g.add_edge(i.item(), m)
 
+    rank_one_util = rank_one_util / spike_tensor.shape[0]
+    rank_two_util = rank_two_util / (spike_tensor.shape[0] * 2)
+    ideal_util = ideal_util / (spike_tensor.shape[0] * 2)
+    total_elements = spike_tensor.shape[0] * spike_tensor.shape[1]
+
+
     # print("original_nnz", original_nnz, "rank_one_reduced_nnz: ", rank_one_reduced_nnz, "ideal_reduced_nnz: ", ideal_reduced_nnz)
-    return t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size, new_tensor
+    return rank_one_reduced_nnz, rank_two_reduced_nnz, ideal_reduced_nnz, original_nnz, total_elements, rank_one_util, rank_two_util, ideal_util
 
 def visualize_dag(G, filename):
     # Check if the graph is a DAG
@@ -257,16 +369,124 @@ def all_zero_analysis():
     print("sparsity of q: ", get_density(q), "sparsity of k: ", get_density(k), "sparsity of v: ", get_density(v))
     print("original_computation: ", original_computation, "reduced_computation: ", reduced_computation, "additional_overhead: ", additional_overhead)
 if __name__ == '__main__':
-    nn = create_network('spikformer', 'data/spikformer_cifar10.pkl')
-    fc = nn[10]
-    mat = fc.activation_tensor.sparse_map
-    mat = mat.reshape(-1, mat.shape[-1])
-    mat = mat[0:256, 0:16]
+
+    model_list = ['lenet5_mnist', 'spikebert_sst2', 'spikebert_mr', 'spikebert_sst5', 
+                     'spikingbert_sst2', 'spikingbert_qqp', 'spikingbert_mnli', 
+                     'spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 
+                     'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100',
+                     'vgg16_cifar10', 'vgg16_cifar100', 
+                       'resnet18_cifar10', 'resnet18_cifar100']
     
-    t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size, new_act = construct_subset_DAG(mat)
-    parents = torch.tensor([list(t.predecessors(node))[0] if len(list(t.predecessors(node))) > 0 else -1 for node in t.nodes])
-    visualize_matrix_with_parent(mat, parents, 'matrix.txt')
-    visualize_matrix(new_act, 'new_matrix.txt')
+    model = 'spikformer'
+    dataset = 'cifar100'
+
+    nn = create_network(model, 'data/{}_{}.pkl'.format(model, dataset))
+    max_density = 0
+    max_density_id = 0
+    id = 0
+    for layer in nn:
+        if isinstance(layer, Conv2D):
+            eq_fc = conv2d_2_fc(layer)
+            print("sparse: ", get_density(eq_fc.activation_tensor.sparse_map))
+            if get_density(eq_fc.activation_tensor.sparse_map) > max_density:
+                max_density = get_density(eq_fc.activation_tensor.sparse_map)
+                max_density_id = id
+        elif isinstance(layer, FC):
+            print("sparse: ", get_density(layer.activation_tensor.sparse_map))
+            if get_density(layer.activation_tensor.sparse_map) > max_density:
+                max_density = get_density(layer.activation_tensor.sparse_map)
+                max_density_id = id
+        # elif isinstance(layer, FC):
+        #     print("sparse: ", get_density(layer.activation_tensor.sparse_map))
+        #     if get_density(layer.activation_tensor.sparse_map) > max_density:
+        #         max_density = get_density(layer.activation_tensor.sparse_map)
+        #         max_density_id = id
+        id += 1
+
+    layer = nn[max_density_id]
+    if isinstance(layer, Conv2D):
+        layer = conv2d_2_fc(layer)
+    
+    tensor = layer.activation_tensor.sparse_map
+    tensor = tensor.reshape(-1, tensor.shape[-1])
+    begin = 64
+    end = 128
+    plot_matrix(tensor[begin:end,begin:end], '{}_before.png'.format(model))
+    print("before sparsity: ", get_density(tensor[begin:end,begin:end]))
+    sparsified_tensor = product_sparsify_whole_matrix(layer, tensor)
+    plot_matrix(sparsified_tensor[begin:end,begin:end], '{}_after.png'.format(model))
+    print("after sparsity: ", get_density(sparsified_tensor[begin:end,begin:end]))
+
+    raise ValueError("stop here")
+
+    for model in model_list:
+        model_name = model.split('_')[0]
+        nn = create_network(model_name, 'data/{}.pkl'.format(model))
+
+        tile_size_m = 256
+        tile_size_k = 16
+        rank_one_util_list = []
+        rank_two_util_list = []
+        ideal_util_list = []
+        rank_one_nnz_list = []
+        rank_two_nnz_list = []
+        ideal_nnz_list = []
+        original_nnz_list = []
+        element_list = []
+        all_output_dim = 0
+        for op in nn:
+            if isinstance(op, Conv2D):
+                eq_fc = conv2d_2_fc(op)
+            elif isinstance(op, FC):
+                eq_fc = op
+            else:
+                continue
+            tensor = eq_fc.activation_tensor.sparse_map
+            tensor = tensor.reshape(-1, tensor.shape[-1])
+            all_output_dim += eq_fc.output_dim
+            print("model: ", model)
+            print("sparsity: ", get_density(tensor))
+            for i in range(0, tensor.shape[0], tile_size_m):
+                for j in range(0, tensor.shape[1], tile_size_k):
+                    cur_tile_size_m = min(tile_size_m, tensor.shape[0] - i)
+                    cur_tile_siz_k = min(tile_size_k, tensor.shape[1] - j)
+                    tile = tensor[i:i+cur_tile_size_m, j:j+cur_tile_siz_k]
+                    rank_one_reduced_nnz, rank_two_reduced_nnz, ideal_reduced_nnz, original_nnz, total_elements, rank_one_util, rank_two_util, ideal_util = construct_subset_DAG(tile)
+                    rank_one_util_list.append(rank_one_util * ceil_a_by_b(eq_fc.output_dim, 128))
+                    ideal_util_list.append(ideal_util * ceil_a_by_b(eq_fc.output_dim, 128))
+                    rank_one_nnz_list.append(rank_one_reduced_nnz * ceil_a_by_b(eq_fc.output_dim, 128))
+                    ideal_nnz_list.append(ideal_reduced_nnz * ceil_a_by_b(eq_fc.output_dim, 128))
+                    original_nnz_list.append(original_nnz * ceil_a_by_b(eq_fc.output_dim, 128))
+                    rank_two_util_list.append(rank_two_util * ceil_a_by_b(eq_fc.output_dim, 128))
+                    rank_two_nnz_list.append(rank_two_reduced_nnz * ceil_a_by_b(eq_fc.output_dim, 128))
+                    element_list.append(total_elements * ceil_a_by_b(eq_fc.output_dim, 128))
+
+        print("rank_one_util: ", np.mean(rank_one_util_list) / all_output_dim, "ideal_util: ", np.mean(ideal_util_list) / all_output_dim)
+        print("rank_one_density: ", np.sum(rank_one_nnz_list) / np.sum(element_list), "ideal_density: ", np.sum(ideal_nnz_list) / np.sum(element_list))
+        print("original_density: ", np.sum(original_nnz_list) / np.sum(element_list))
+        print("rank_two_density: ", np.sum(rank_two_nnz_list) / np.sum(element_list), "rank_two_util: ", np.mean(rank_two_util_list) / all_output_dim)
+
+        # write to file
+        with open('rank12.txt'.format(model), 'a') as f:
+            f.write("model: {}\n".format(model))
+            f.write("rank_one_util: {}\n".format(np.sum(rank_one_util_list) / all_output_dim))
+            f.write("ideal_util: {}\n".format(np.sum(ideal_util_list) / all_output_dim))
+            f.write("rank_two_util: {}\n".format(np.sum(rank_two_util_list) / all_output_dim))
+            f.write("rank_one_density: {}\n".format(np.sum(rank_one_nnz_list) / np.sum(element_list)))
+            f.write("ideal_density: {}\n".format(np.sum(ideal_nnz_list) / np.sum(element_list)))
+            f.write("original_density: {}\n".format(np.sum(original_nnz_list) / np.sum(element_list)))
+            f.write("rank_two_density: {}\n".format(np.sum(rank_two_nnz_list) / np.sum(element_list)))
+
+
+    # fc = nn[10]
+    # mat = fc.activation_tensor.sparse_map
+    # mat = mat.reshape(-1, mat.shape[-1])
+    # mat = mat[0:256, 0:16]
+    
+    # t, g, original_nnz, rank_one_reduced_nnz, ideal_reduced_nnz, argmax_size, new_act = construct_subset_DAG(mat)
+    # parents = torch.tensor([list(t.predecessors(node))[0] if len(list(t.predecessors(node))) > 0 else -1 for node in t.nodes])
+    # visualize_matrix_with_parent(mat, parents, 'matrix.txt')
+    # visualize_matrix(new_act, 'new_matrix.txt')
     # conv = nn[0]
     # whole_network_analysis(nn)
 
