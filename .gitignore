@@ -1,6 +1,7 @@
 # my custom gitignore file
 trash_can/
 output/
+.vscode
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
