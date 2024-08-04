@@ -39,7 +39,7 @@
     "associativity":"1",
     "block size (bytes)":"4",
     "burst length":"8",
-    "bus_freq 800 MHz":"",
+    "bus_freq":"500 MHz",
     "cache type":"\"ram\"",
     "capacity":"80",
     "design objective (weight delay, dynamic power, leakage power, cycle time, area)":"0:100:1000:0:100",
