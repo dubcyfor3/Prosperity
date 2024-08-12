@@ -10,6 +10,8 @@ from cacti import CactiSweep
 import argparse
 import os
 import networkx as nx
+import pandas as pd
+import heapq
 
 logging.basicConfig(level=logging.INFO)
 
@@ -121,6 +123,7 @@ class Simulator:
         self.track_sparsity_increment = True
         self.test_rank_two = False
         self.device = 'cpu'
+        self.fc_stats_list = []
 
     def sim(self):
         if self.accelerator.type == 'PTB':
@@ -277,7 +280,7 @@ class Simulator:
         return total_stats
 
     
-    def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
+    def run_fc1(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
         stats = Stats()
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
         # only deal with batch size 1
@@ -387,7 +390,8 @@ class Simulator:
                             issue_cycles = depth // 4 * cur_act.shape[0]
                         elif self.accelerator.tree_manage_type == 2:
                             issue_cycles = 0
-                        this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
+                        # this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
+                        this_compute_cycles = torch.sum(preprocess_act != 0).item() + num_prefix
                         compute_cycles += max(this_compute_cycles, issue_cycles)
 
                         
@@ -446,12 +450,204 @@ class Simulator:
         stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
         stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
 
+        fc_stats = {
+            'name': operator.name,
+            'original_compute_cycles': orginial_compute_cycles,
+            'compute_cycles': compute_cycles,
+            'preprocess_cycles': preprocess_cycles,
+            'total_cycles': stats.total_cycles,
+        }
+        self.fc_stats_list.append(fc_stats)
 
         print(operator.name)
         print("original compute cycles: ", orginial_compute_cycles)
         print("compute cycles: ", compute_cycles)
         print("preprocess cycles: ", preprocess_cycles)
         print("total cycles: ", stats.total_cycles)
+
+
+        return stats
+    
+    def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
+        stats = Stats()
+        assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
+        # only deal with batch size 1
+        assert operator.time_steps * operator.sequence_length * operator.input_dim == operator.activation_tensor.sparse_map.numel()
+        # reshape activation tensor
+        # to device
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.to(self.device)
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.reshape(operator.time_steps, operator.sequence_length, operator.input_dim)
+        # transpose time step and sequence length
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
+
+
+        input_shape = operator.activation_tensor.shape
+        input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
+        
+        input_tensor = operator.activation_tensor.sparse_map.reshape(input_shape)
+        M, K, N = input_shape[0], input_shape[1], operator.weight_tensor.shape[1]
+        tile_size_M = self.accelerator.SpMM_tile_size_M
+        tile_size_K = self.accelerator.SpMM_tile_size_K
+        tile_size_N = self.accelerator.adder_array_size
+        tile_num_M = ceil_a_by_b(M, tile_size_M)
+        tile_num_K = ceil_a_by_b(K, tile_size_K)
+        tile_num_N = ceil_a_by_b(N, tile_size_N)
+
+        act_tile_size = tile_size_M * tile_size_K * 1 # spike is one bit
+        wgt_tile_size = tile_size_K * tile_size_N * operator.weight_tensor.nbits
+
+        if M * K <= self.accelerator.sram_size['act']:
+            buffer_state_act = "store all"
+        elif act_tile_size * tile_num_K <= self.accelerator.sram_size['act']:
+            buffer_state_act = "store row"
+        elif act_tile_size <= self.accelerator.sram_size['act']:
+            buffer_state_act = "store single tile"
+        else:
+            raise Exception("single tile cannot fit in sram act buffer")
+        
+        if K * N * operator.weight_tensor.nbits <= self.accelerator.sram_size['wgt']:
+            buffer_state_wgt = "store all"
+        elif wgt_tile_size * tile_num_K <= self.accelerator.sram_size['wgt']:
+            buffer_state_wgt = "store col"
+        elif wgt_tile_size <= self.accelerator.sram_size['wgt']:
+            buffer_state_wgt = "store single tile"
+        else:
+            raise Exception("single tile cannot fit in sram wgt buffer")
+
+        # 1. load activation and weight to sram
+        # 2. load activation and weight to local buffer
+        # 3. do preprocess to the activation
+        # 4. start computation
+        compute_cycles = 0
+        preprocess_cycles = 0
+        orginial_compute_cycles = 0
+
+        is_conv = operator.name.endswith('2fc')
+
+
+        for m in range(tile_num_M):
+            for n in range(tile_num_N):
+                for k in range(tile_num_K):
+                    cur_tile_size_M = min(tile_size_M, M - m * tile_size_M)
+                    cur_tile_size_K = min(tile_size_K, K - k * tile_size_K)
+                    cur_tile_size_N = min(tile_size_N, N - n * tile_size_N)
+                    cur_act = input_tensor[m * tile_size_M: m * tile_size_M + cur_tile_size_M, k * tile_size_K: k * tile_size_K + cur_tile_size_K]
+
+                    if not spike_stored_in_buffer:
+                        if buffer_state_act == "store single tile":
+                            if is_conv:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                            else:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        elif buffer_state_act == "store row":
+                            if is_conv:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                            else:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        elif buffer_state_act == "store all" and n == 0:
+                            if is_conv:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                            else:
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
+                            stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
+                    if not weight_stored_in_buffer:
+                        if buffer_state_wgt == "store single tile":
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                        elif buffer_state_wgt == "store col" and m == 0:
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                        elif buffer_state_wgt == "store all" and m == 0:
+                            stats.reads['dram'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+                            stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+
+                    if self.accelerator.product_sparsity:
+                        V_hat, E_hat, cur_cycles = self.hag_search_algorithm(cur_act)
+                        stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        stats.reads['g_wgt'] += len(E_hat) * cur_tile_size_N * operator.weight_tensor.nbits
+                        # find the row in preprocess_act that is all zero, if all zero originally, no cycles needed, if not, need one cycle
+                        nnz_each_row = len(E_hat)
+                        nnz_each_row_ori = torch.sum(cur_act != 0, dim=-1)
+                        all_zero_row = nnz_each_row
+                        all_zero_row_ori = nnz_each_row_ori == 0
+                        # this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
+                        this_compute_cycles = len(E_hat)
+                        compute_cycles += this_compute_cycles
+
+                        
+
+                        preprocess_cycles += cur_cycles
+                        orginial_compute_cycles += torch.sum(cur_act != 0).item()
+                        stats.num_ops += len(E_hat) * cur_tile_size_N
+
+                        # rank_one_prefix.append(num_prefix)
+                    
+                    elif not self.accelerator.dense:
+                        compute_cycles += torch.sum(cur_act != 0).item()
+
+                        stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        stats.reads['g_wgt'] += torch.sum(cur_act != 0).item() * cur_tile_size_N * operator.weight_tensor.nbits
+
+                        stats.num_ops += torch.sum(cur_act != 0).item() * cur_tile_size_N
+                    
+                    elif self.accelerator.dense:
+                        compute_cycles += cur_tile_size_M * cur_tile_size_K
+
+                        stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
+                        stats.reads['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
+
+
+                    # write results to partial sum buffer
+                    stats.reads['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
+                    stats.writes['g_psum'] += cur_tile_size_M * cur_tile_size_N * operator.output_tensor.nbits
+
+
+                    if self.accelerator.product_sparsity and self.track_sparsity_increment:
+                        ori_nnzs.append(torch.sum(cur_act != 0).item())
+                        processed_nnzs.append(len(E_hat))
+                        ops_nnzs.append(len(E_hat) - torch.sum(all_zero_row_ori).item())
+                        total_elements.append(cur_tile_size_M * cur_tile_size_K)
+
+
+                    if self.test_rank_two:
+                        rank_two_act, num_prefix = self.find_rank_two_product_sparsity(cur_act)
+                        rank_two_nnzs.append(torch.sum(rank_two_act != 0).item())
+
+                        rank_two_prefix.append(num_prefix)
+
+        init_mem_access = 0
+        if not weight_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_N, N) * operator.weight_tensor.nbits # read the first tile from dram to buffer
+        if not spike_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_M, M)
+
+        total_mem_access = stats.reads['dram'] + stats.writes['dram']
+        middle_mem_access = total_mem_access - init_mem_access
+        init_latency = init_mem_access // self.accelerator.mem_if_width
+        middle_latency = middle_mem_access // self.accelerator.mem_if_width
+        stats.compute_cycles = max(compute_cycles, preprocess_cycles)
+        stats.preprocess_stall_cycles = max(0, preprocess_cycles - compute_cycles)
+        stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
+        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+        fc_stats = {
+            'name': operator.name,
+            'original_compute_cycles': orginial_compute_cycles,
+            'compute_cycles': compute_cycles,
+            'preprocess_cycles': preprocess_cycles,
+            'total_cycles': stats.total_cycles,
+            'aggregate_num': len(V_hat) - tile_size_K
+        }
+        self.fc_stats_list.append(fc_stats)
+
+        print(operator.name)
+        print("original compute cycles: ", orginial_compute_cycles)
+        print("compute cycles: ", compute_cycles)
+        print("preprocess cycles: ", preprocess_cycles)
+        print("total cycles: ", stats.total_cycles)
+        print("aggregate num:", len(V_hat) - tile_size_K)
 
 
         return stats
@@ -750,7 +946,63 @@ class Simulator:
             preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], prefix_row)
 
         return preprocessed_act, num_prefix
-                            
+
+    def hag_search_algorithm(self, act: torch.Tensor, capacity=112):
+        M, K = act.shape
+        E = {(j, i) for i in range(M) for j in range(K) if act[i, j] == 1}
+        E_hat = E.copy()
+        cycles = 0
+        V = set(range(K))
+        V_A = set()
+
+        def redundancy(v1, v2):
+            return sum((v1, u) in E_hat and (v2, u) in E_hat for u in range(M + len(V_A)))
+
+        heap = []
+        heap_dict = {} 
+        for v1 in range(K):
+            for v2 in range(v1 + 1, K):
+                r = redundancy(v1, v2)
+                heapq.heappush(heap, (-r, (v1, v2)))
+                heap_dict[(v1, v2)] = -r
+        cycles += len(V.union(V_A))
+
+        while len(V_A) < capacity and heap:
+            max_redundancy, (v1, v2) = heapq.heappop(heap)
+            del heap_dict[(v1, v2)]
+            max_redundancy = -max_redundancy
+
+            if max_redundancy > 1:
+                w = max(M, K) + len(V_A)
+                E_hat.update([(v1, w), (v2, w)])
+                V_A.add(w)
+
+                for u in range(M):
+                    if (v1, u) in E_hat and (v2, u) in E_hat:
+                        E_hat.remove((v1, u))
+                        E_hat.remove((v2, u))
+                        E_hat.add((w, u))
+
+                # Update redundancy for affected pairs
+                for u in V.union(V_A) - {v1, v2, w}:
+                    for v in (v1, v2):
+                        smaller, larger = sorted((v, u))
+                        if (smaller, larger) in heap_dict:
+                            r = redundancy(smaller, larger)
+                            old_r = heap_dict[(smaller, larger)]
+                            heap_dict[(smaller, larger)] = -r
+                            heap.remove((old_r, (smaller, larger)))
+                            heapq.heappush(heap, (-r, (smaller, larger)))
+                    
+                    r = redundancy(w, u)
+                    heapq.heappush(heap, (-r, (u, w)))
+                    heap_dict[(u, w)] = -r
+
+                cycles += 1
+            else:
+                break
+
+        return V_A.union(V), E_hat, cycles
     
     def find_product_sparsity(self, act: torch.Tensor):
         cycles = 0
@@ -1119,3 +1371,7 @@ if __name__ == '__main__':
             #     f.write(f"{key}: {value / stats.total_cycles}\n")
             f.write("\n")
 
+            # Save FC stats to Excel
+            if args.type == 'Prosperity':
+                df = pd.DataFrame(sim.fc_stats_list, columns=['name', 'original_compute_cycles', 'compute_cycles', 'preprocess_cycles', 'total_cycles', 'aggreate_num'])
+                df.to_excel(os.path.join(args.output_dir, filename + '_fc_stats_hag.xlsx'), index=False, header=True)
