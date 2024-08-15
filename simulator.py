@@ -1,5 +1,5 @@
 from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc
-from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2
+from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2, Stats
 import torch
 import numpy as np
 from collections import defaultdict
@@ -10,6 +10,8 @@ from cacti import CactiSweep
 import argparse
 import os
 import networkx as nx
+from accelerator import Accelerator
+from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato
 
 logging.basicConfig(level=logging.INFO)
 
@@ -38,80 +40,7 @@ def clear_global_stats():
     rank_one_prefix = []
     rank_two_prefix = []
 
-class Stats:
-    def __init__(self):
-        self.total_cycles = 0
-        self.mem_stall_cycles = 0
-        self.compute_cycles = 0
-        self.num_ops = 0
-        self.LIF_latency = 0
-        self.preprocess_stall_cycles = 0
-        self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum']
-        self.reads = {space: 0 for space in self.mem_namespace}
-        self.writes = {space: 0 for space in self.mem_namespace}
-        self.original_sparsity = 0
-        self.processed_sparsity = 0
-        self.ops_sparsity = 0
-        self.rank_two_sparsity = 0
-        self.avg_rank_one_prefix = 0
-        self.avg_rank_two_prefix = 0
-        self.cycle_breakdown = None
-
-    def __add__(self, other):
-        if not isinstance(other, Stats):
-            raise Exception("unsupported type")
-        else:
-            added_stats = Stats()
-            added_stats.total_cycles = self.total_cycles # handle cycles manually
-            added_stats.mem_stall_cycles = self.mem_stall_cycles + other.mem_stall_cycles
-            added_stats.compute_cycles = self.compute_cycles + other.compute_cycles
-            added_stats.preprocess_stall_cycles = self.preprocess_stall_cycles + other.preprocess_stall_cycles
-            added_stats.num_ops = self.num_ops + other.num_ops
-            added_stats.LIF_latency = 0
-            added_stats.mem_namespace = self.mem_namespace
-            added_stats.reads = {space: self.reads[space] + other.reads[space] for space in self.mem_namespace}
-            added_stats.writes = {space: self.writes[space] + other.writes[space] for space in self.mem_namespace}
-            
-            return added_stats
         
-
-
-class Accelerator:
-    def __init__(self, type, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, product_sparsity=True, dense=False, tree_manage_type=2, mem_if_width=1024):
-        self.type = type
-        self.num_popcnt = 8
-        self.adder_array_size = adder_array_size  # tile size N
-        self.LIF_array_size = LIF_array_size
-        self.multiplier_array_size = 32
-        self.num_exp = 8
-        self.num_div = 1
-        self.SpMM_tile_size_M = tile_size_M
-        self.SpMM_tile_size_K = tile_size_K
-        self.mem_if_width = mem_if_width
-        self.tech_node = 0.028
-        self.sram_size = {}
-        self.sram_size['wgt'] = self.SpMM_tile_size_K * self.adder_array_size * 8    # global buffer ori 16 * 128 * 8
-        self.sram_size['act'] = self.SpMM_tile_size_M * self.SpMM_tile_size_K * 1    # global buffer ori 16 * 256
-        self.sram_size['out'] = self.SpMM_tile_size_M * self.adder_array_size * 8       # global buffer 258 * 16
-
-        self.product_sparsity = product_sparsity
-        self.dense = dense
-        self.tree_manage_type = tree_manage_type # 0: store tree in adj 1: search tree through prefix 2: sorting based tree
-
-    def get_sram_stats(self):
-        cacti_sweep = CactiSweep()
-        buffer_cfg = {'block size (bytes)': self.adder_array_size, 
-                            'size (bytes)': self.SpMM_tile_size_M * self.adder_array_size, 
-                            'technology (u)': self.tech_node}
-        
-        output_dict = {}
-        output_dict['area'] = cacti_sweep.get_data_clean(buffer_cfg)['area_mm^2'].values[0] * 2 # 2 for ping-pong buffer
-        output_dict['leak_power'] = cacti_sweep.get_data_clean(buffer_cfg)['leak_power_mW'].values[0] * 2
-        output_dict['read_energy'] = cacti_sweep.get_data_clean(buffer_cfg)['read_energy_nJ'].values[0]
-        output_dict['write_energy'] = cacti_sweep.get_data_clean(buffer_cfg)['write_energy_nJ'].values[0]
-
-        return output_dict
-
 
 
 class Simulator:
@@ -124,11 +53,11 @@ class Simulator:
 
     def sim(self):
         if self.accelerator.type == 'PTB':
-            stats = self.run_simulation_PTB()
+            stats = run_simulation_PTB(self.network)
         elif self.accelerator.type == 'eyeriss':
-            stats = self.run_simulation_eyeriss()
+            stats = run_simulation_eyeriss(self.network)
         elif self.accelerator.type == 'SATO':
-            stats = self.run_simulation_sato()
+            stats = run_simulation_sato(self.network)
         elif self.accelerator.type == 'Prosperity':
             stats = self.run_simulation()
         else:
@@ -136,62 +65,7 @@ class Simulator:
 
         return stats
     
-    def run_simulation_sato(self):
-        stats = OrderedDict()
-        for operator in self.network:
-            if isinstance(operator, Conv2D) or isinstance(operator, FC):
-                stats[operator.name] = self.run_sato_conv_fc(operator)
-            elif isinstance(operator, LIFNeuron):
-                stats[operator.name] = self.run_sato_lif(operator)
 
-        total_stats = Stats()
-        for key, value in stats.items():
-            total_stats += value
-            total_stats.total_cycles += value.total_cycles
-
-        return total_stats
-
-    def run_simulation_eyeriss(self):
-        stats = OrderedDict()
-        for operator in self.network:
-            if isinstance(operator, Conv2D) or isinstance(operator, FC) or isinstance(operator, LIFNeuron):
-                stats[operator.name] = self.run_eyeriss_conv_fc(operator)
-            elif isinstance(operator, Attention):
-                stats[operator.name] = self.run_eyeriss_attention(operator)
-            elif isinstance(operator, LayerNorm):
-                stats[operator.name] = self.run_eyeriss_layernorm(operator)
-            else:
-                continue
-        
-        total_stats = Stats()
-        for key, value in stats.items():
-            total_stats += value
-            total_stats.total_cycles += value.total_cycles
-
-        return total_stats
-
-    def run_simulation_PTB(self):
-        stats = OrderedDict()
-        for operator in self.network:
-            if isinstance(operator, Conv2D) or isinstance(operator, FC):
-                stats[operator.name] = self.run_PTB_convfc(operator)
-            elif isinstance(operator, LIFNeuron):
-                stats[operator.name] = self.run_PTB_lif(operator)
-
-        
-
-        total_stats = Stats()
-        for key, value in stats.items():
-            total_stats += value
-            total_stats.total_cycles += value.total_cycles
-
-        density = sum(processed_nnzs) / sum(total_elements)
-        total_stats.processed_sparsity = density
-        print("PTB sparsity: ", density)
-        print("total cycles: ", total_stats.total_cycles)
-        print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
-
-        return total_stats
     
     def run_simulation(self, linear_workload=False):
         stats = OrderedDict()
@@ -373,7 +247,8 @@ class Simulator:
                             stats.writes['g_wgt'] += cur_tile_size_K * cur_tile_size_N * operator.weight_tensor.nbits
 
                     if self.accelerator.product_sparsity:
-                        preprocess_act, cur_cycles, num_prefix, depth = self.find_product_sparsity(cur_act)
+                        preprocess_act, prefix_array = find_product_sparsity(cur_act)
+                        prosparsity_cycles = get_prosparsity_cycles(cur_act) + cur_act.shape[0] // self.accelerator.num_popcnt
                         stats.reads['g_act'] += cur_tile_size_M * cur_tile_size_K
                         stats.reads['g_wgt'] += torch.sum(preprocess_act != 0).item() * cur_tile_size_N * operator.weight_tensor.nbits
                         # find the row in preprocess_act that is all zero, if all zero originally, no cycles needed, if not, need one cycle
@@ -381,22 +256,17 @@ class Simulator:
                         nnz_each_row_ori = torch.sum(cur_act != 0, dim=-1)
                         all_zero_row = nnz_each_row == 0
                         all_zero_row_ori = nnz_each_row_ori == 0
-                        if self.accelerator.tree_manage_type == 0:
-                            issue_cycles = 0
-                        elif self.accelerator.tree_manage_type == 1:
-                            issue_cycles = depth // 4 * cur_act.shape[0]
-                        elif self.accelerator.tree_manage_type == 2:
-                            issue_cycles = 0
+                        issue_cycles = 0
                         this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
                         compute_cycles += max(this_compute_cycles, issue_cycles)
 
                         
 
-                        preprocess_cycles += cur_cycles
+                        preprocess_cycles += prosparsity_cycles
                         orginial_compute_cycles += torch.sum(cur_act != 0).item()
                         stats.num_ops += torch.sum(preprocess_act != 0).item() * cur_tile_size_N
 
-                        rank_one_prefix.append(num_prefix)
+                        rank_one_prefix.append(torch.sum(prefix_array != -1).item())
                     
                     elif not self.accelerator.dense:
                         compute_cycles += torch.sum(cur_act != 0).item()
@@ -426,7 +296,7 @@ class Simulator:
 
 
                     if self.test_rank_two:
-                        rank_two_act, num_prefix = self.find_rank_two_product_sparsity(cur_act)
+                        rank_two_act, num_prefix = find_rank_two_product_sparsity(cur_act)
                         rank_two_nnzs.append(torch.sum(rank_two_act != 0).item())
 
                         rank_two_prefix.append(num_prefix)
@@ -690,343 +560,119 @@ class Simulator:
 
         return stats
 
-
-    def find_rank_two_product_sparsity(self, act: torch.Tensor):
-        preprocessed_act = act.clone()
-
-        num_prefix = 0
-
-        for i in range(act.shape[0]):
-            cur_row = act[i]
-            nnz = torch.sum(cur_row != 0).item()
-            if nnz < 2:
-                continue
-            and_result = torch.logical_and(cur_row, act)
-            equalities = torch.eq(and_result, act)
-            is_subset = torch.all(equalities, dim=-1)
-
-            equalities = torch.eq(cur_row, act)
-            is_equal = torch.all(equalities, dim=-1)
-            is_bigger_index = torch.arange(act.shape[0], device=self.device) >= i
-
-            is_excluded = torch.logical_and(is_equal, is_bigger_index)
-            is_real_subset = torch.logical_and(is_subset, ~is_excluded)
-
-            if torch.sum(is_real_subset) == 0:
-                continue
-
-            
-            subset_row = act[is_real_subset]
-            subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
-
-            max_subset_size = torch.max(subset_row_nnz).item()
-            prefix_row = subset_row[torch.argmax(subset_row_nnz)]
-            prefix_row_nnz = torch.sum(prefix_row).item()
-            rank_one_prefix_nnz = prefix_row_nnz
-            if prefix_row_nnz > 0:
-                num_prefix += 1
-
-            if max_subset_size == torch.sum(cur_row).item():
-                preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], prefix_row)
-                continue
-
-            for j in range(subset_row.shape[0]):
-                cur_subset_row = subset_row[j]
-                if prefix_row_nnz == nnz:
-                    break
-                if torch.sum(cur_subset_row) == 0:
-                    continue
-
-                and_result = torch.logical_and(cur_subset_row, subset_row)
-                and_sum = torch.sum(and_result, dim=-1)
-                for k in range(and_sum.shape[0]):
-                    if and_sum[k].item() == 0:
-                        if torch.sum(cur_subset_row) + torch.sum(subset_row[k]) > prefix_row_nnz:
-                            prefix_row = torch.logical_or(cur_subset_row, subset_row[k])
-                            prefix_row_nnz = torch.sum(prefix_row).item()
-
-            if prefix_row_nnz > rank_one_prefix_nnz:
-                num_prefix += 1
-            preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], prefix_row)
-
-        return preprocessed_act, num_prefix
                             
     
-    def find_product_sparsity(self, act: torch.Tensor):
-        cycles = 0
 
-        cycles += act.shape[0] // self.accelerator.num_popcnt
-
-        num_prefix = 0
-        preprocessed_act = act.clone()
-
-        # create a directed graph
-        t = nx.DiGraph()
-        t.add_nodes_from(range(act.shape[0]))
-
-        for i in range(act.shape[0]):
-            cur_row = act[i]
-            nnz = torch.sum(cur_row != 0).item()
-            if nnz < 2:
-                continue
-
-            and_result = torch.logical_and(cur_row, act)
-            equalities = torch.eq(and_result, act)
-            is_subset = torch.all(equalities, dim=-1)
-
-            equalities = torch.eq(cur_row, act)
-            is_equal = torch.all(equalities, dim=-1)
-            is_bigger_index = torch.arange(act.shape[0], device=self.device) >= i
-
-            is_excluded = torch.logical_and(is_equal, is_bigger_index)
-            is_real_subset = torch.logical_and(is_subset, ~is_excluded)
-
-            cycles += 1 # pipelined
-
-            if torch.sum(is_real_subset) == 0:
-                # CAM no match
-                continue
-
-            subset_row = act[is_real_subset]
-            subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
-            max_subset_size = torch.max(subset_row_nnz).item()
-            max_subset = subset_row[torch.argmax(subset_row_nnz)]
-
-            if True:
-                subset_index = torch.nonzero(is_real_subset).flatten()
-                subset_size = torch.sum(act[is_real_subset], dim=-1)
-                max_subset_size, max_subset_index = torch.max(subset_size, dim=-1)
-
-                if max_subset_size.item() < 1:
-                    continue
-                t.add_edge(subset_index[max_subset_index].item(), i)
-
-            # if max_subset_size > 1: # can also reuse even when the size is 1
-            preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
-
-            if max_subset_size > 0:
-                num_prefix += 1
-            
-        # get the depth of the forest
-        depth = nx.dag_longest_path_length(t)
-
-        return preprocessed_act, cycles, num_prefix, depth
+def verify_product_sparsity(act_pro: torch.Tensor, act_bit: torch.Tensor, tree: nx.DiGraph):
+    for i in range(act_pro.shape[0]):
+        if tree.in_degree(i) == 0:
+            continue
+        prefix = list(tree.predecessors(i))
+        prefix_row = act_bit[prefix[0]]
+        overlap = torch.logical_and(prefix_row, act_pro[i])
+        assert torch.sum(overlap) == 0
+        act_pro[i] = torch.logical_or(act_pro[i], prefix_row)
+    # check if two tensor are same
+    assert torch.all(act_pro == act_bit)
+    return True
     
-    
-    def StSAP(self, act: torch.Tensor):
 
-        # systolic array of size 16x8
-
-        whole_act = act.clone()
-        # processed_act = whole_act.reshape(-1, act.shape[-1])
-        total_length = 0
-
-
-        for i in range(whole_act.shape[0]):
-            processed_act = whole_act[i]
-            # find row with all zero
-            all_zero_row = torch.sum(processed_act != 0, dim=-1) == 0
-            # find row with all nonzero
-            all_nonzero_row = torch.sum(processed_act != 0, dim=-1) == processed_act.shape[-1]
-            excepted_row = torch.logical_or(all_zero_row, all_nonzero_row)
-            # get all the row except all zero row and all nonzero row
-            processed_act = processed_act[~excepted_row]
-            cur_size = processed_act.shape[0]
-            searched_row = torch.zeros(processed_act.shape[0], dtype=torch.bool)
-            for i in range(processed_act.shape[0] - 1):
-                if searched_row[i]:
-                    continue
-                cur_row = processed_act[i]
-                rest_row = processed_act[i+1:]
-                and_result = torch.logical_and(cur_row, rest_row)
-                non_overlap_row = torch.sum(and_result, dim=-1) == 0
-                # pad the left of non_overlap_row to the original shape
-                non_overlap_row = torch.cat([torch.zeros(i + 1, dtype=torch.bool), non_overlap_row])
-                non_overlap_row = torch.logical_and(non_overlap_row, ~searched_row)
-                # find the first nonzero in non_overlap_row
-                first_nonzero = torch.argmax(non_overlap_row.to(torch.int)).item()
-                if first_nonzero != 0:
-                    cur_size -= 1
-                    searched_row[first_nonzero] = True
-
-            processed_size = cur_size + torch.sum(all_nonzero_row)
-
-            total_length += processed_size.item()
-        return total_length
-
-    def run_eyeriss_conv_fc(self, operator: Union[FC, Conv2D, LIFNeuron]):
-        # a 16 x 8 systolic array, weight stationary
-
-        stats = Stats()
-        if isinstance(operator, FC):
-            stats.compute_cycles += operator.output_dim // 8 * operator.input_dim // 16 * operator.batch_size * operator.time_steps * operator.sequence_length
-        elif isinstance(operator, Conv2D):
-            eq_fc = conv2d_2_fc(operator)
-            stats.compute_cycles += eq_fc.output_dim // 8 * eq_fc.input_dim // 16 * eq_fc.batch_size * eq_fc.time_steps * eq_fc.sequence_length
-        elif isinstance(operator, LIFNeuron):
-            stats.compute_cycles += (operator.time_steps // 8) * operator.num_neuron * operator.batch_size // 16
-        else:
-            pass
-
-        stats.total_cycles = stats.compute_cycles
-        print(operator.name)
-        print("total cycles: ", stats.compute_cycles)
-
-        return stats
-    
-    def run_eyeriss_layernorm(self, operator: LayerNorm):
-        stats = Stats()
-
-        num_ops = operator.activation_tensor.get_size() + (operator.activation_tensor.get_size() // operator.dim) * 2 + operator.activation_tensor.get_size() + operator.activation_tensor.get_size()
-        stats.compute_cycles += num_ops // 128
-        stats.total_cycles = stats.compute_cycles
-
-        print(operator.name)
-        print("total cycles: ", stats.compute_cycles)
-        return stats
-
-    def run_eyeriss_attention(self, operator: Attention):
-        stats = Stats()
-
-        if operator.attention_type == 'spikformer' or operator.attention_type == 'spikebert':
-            num_ops = operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.dim_per_head * operator.time_steps * 2
-            stats.compute_cycles += num_ops // 128
-        elif operator.attention_type == 'sdt':
-            num_ops = operator.sequence_length * operator.dim_per_head * operator.batch_size * operator.time_steps * operator.num_head * 4
-            stats.compute_cycles += num_ops // 128
-        elif operator.attention_type == 'spikingbert':
-            num_ops = operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.dim_per_head * operator.time_steps * 2
-            num_ops += operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.time_steps * 2 + operator.sequence_length * operator.batch_size * operator.num_head * operator.time_steps
-            stats.compute_cycles += num_ops // 128
-        else:
-            raise Exception("unsupported attention type")
+def find_rank_two_product_sparsity(act: torch.Tensor):
+    preprocessed_act = act.clone()
+    num_prefix = 0
+    for i in range(act.shape[0]):
+        cur_row = act[i]
+        nnz = torch.sum(cur_row != 0).item()
+        if nnz < 2:
+            continue
+        and_result = torch.logical_and(cur_row, act)
+        equalities = torch.eq(and_result, act)
+        is_subset = torch.all(equalities, dim=-1)
+        equalities = torch.eq(cur_row, act)
+        is_equal = torch.all(equalities, dim=-1)
+        is_bigger_index = torch.arange(act.shape[0]) >= i
+        is_excluded = torch.logical_and(is_equal, is_bigger_index)
+        is_real_subset = torch.logical_and(is_subset, ~is_excluded)
+        if torch.sum(is_real_subset) == 0:
+            continue
         
-        stats.total_cycles = stats.compute_cycles
-        return stats
-        
+        subset_row = act[is_real_subset]
+        subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
+        max_subset_size = torch.max(subset_row_nnz).item()
+        prefix_row = subset_row[torch.argmax(subset_row_nnz)]
+        prefix_row_nnz = torch.sum(prefix_row).item()
+        rank_one_prefix_nnz = prefix_row_nnz
+        if prefix_row_nnz > 0:
+            num_prefix += 1
+        if max_subset_size == torch.sum(cur_row).item():
+            preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], prefix_row)
+            continue
+        for j in range(subset_row.shape[0]):
+            cur_subset_row = subset_row[j]
+            if prefix_row_nnz == nnz:
+                break
+            if torch.sum(cur_subset_row) == 0:
+                continue
+            and_result = torch.logical_and(cur_subset_row, subset_row)
+            and_sum = torch.sum(and_result, dim=-1)
+            for k in range(and_sum.shape[0]):
+                if and_sum[k].item() == 0:
+                    if torch.sum(cur_subset_row) + torch.sum(subset_row[k]) > prefix_row_nnz:
+                        prefix_row = torch.logical_or(cur_subset_row, subset_row[k])
+                        prefix_row_nnz = torch.sum(prefix_row).item()
+        if prefix_row_nnz > rank_one_prefix_nnz:
+            num_prefix += 1
+        preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], prefix_row)
+    return preprocessed_act, num_prefix
+
+def get_prosparsity_cycles(act: torch.Tensor):
+
+    nnz_each_row = torch.sum(act != 0, dim=-1)
+    num_searched_row = torch.sum(nnz_each_row > 1).item()
+
+    return num_searched_row
+
+def find_product_sparsity(act: torch.Tensor):
+    preprocessed_act = act.clone()
+    prefix_array = torch.ones(act.shape[0])
+    prefix_array = -prefix_array # set all to -1
+    for i in range(act.shape[0]):
+        cur_row = act[i]
+        nnz = torch.sum(cur_row != 0).item()
+        if nnz < 2:
+            continue
+        and_result = torch.logical_and(cur_row, act)
+        equalities = torch.eq(and_result, act)
+        is_subset = torch.all(equalities, dim=-1)
+        equalities = torch.eq(cur_row, act)
+        is_equal = torch.all(equalities, dim=-1)
+        is_bigger_index = torch.arange(act.shape[0]) >= i
+        is_excluded = torch.logical_and(is_equal, is_bigger_index)
+        is_real_subset = torch.logical_and(is_subset, ~is_excluded)
+        if torch.sum(is_real_subset) == 0:
+            # CAM no match
+            continue
+        subset_row = act[is_real_subset]
+        subset_row_nnz = torch.sum(subset_row != 0, dim=-1)
+        max_subset_size = torch.max(subset_row_nnz).item()
+        max_subset = subset_row[torch.argmax(subset_row_nnz)]
+        subset_index = torch.nonzero(is_real_subset).flatten()
+        subset_size = torch.sum(act[is_real_subset], dim=-1)
+        max_subset_size, max_subset_index = torch.max(subset_size, dim=-1)
+        if max_subset_size.item() < 1:
+            continue
+        prefix_array[i] = subset_index[max_subset_index].item()
+        # if max_subset_size > 1: # can also reuse even when the size is 1
+        preprocessed_act[i] = torch.logical_xor(preprocessed_act[i], max_subset)
     
-    def run_sato_conv_fc(self, operator: Union[FC, Conv2D]):
-        # 128 PE
-        stats = Stats()
-
-        if isinstance(operator, FC):
-            # do nothing
-            eq_fc = operator
-            pass
-        elif isinstance(operator, Conv2D):
-            eq_fc = conv2d_2_fc(operator)
-
-        input_tensor = eq_fc.activation_tensor.sparse_map.reshape(-1, eq_fc.activation_tensor.sparse_map.shape[-1])
-        nnz_each_row = torch.sum(input_tensor != 0, dim=-1)
-
-        PE_spikes = torch.zeros(128, dtype=torch.int)
-
-        for i in range(input_tensor.shape[0]):
-            min_idx = torch.argmin(PE_spikes)
-            PE_spikes[min_idx] += nnz_each_row[i].item()
-
-        stats.compute_cycles = torch.max(PE_spikes).item() * eq_fc.output_dim
-        stats.total_cycles = stats.compute_cycles
-
-        print(operator.name)
-        print("total cycles: ", stats.compute_cycles)
-
-        return stats
-
-    def run_sato_lif(self, operator: LIFNeuron):
-        stats = Stats()
-        stats.compute_cycles = operator.num_neuron * (torch.log2(torch.tensor(operator.time_steps)).item() + 1) # 1 for leaf node comparator
-        stats.total_cycles = stats.compute_cycles
-        return stats
-
-
-
-    def run_PTB_convfc(self, operator: Union[FC, Conv2D]):
-        # a 16 x 8 systolic array or 21 x 8
-        stats = Stats()
-        time_window_size = 4
-        # pad the time step into power of 2
-        operator.activation_tensor.sparse_map = pad_to_power_of_2(operator.activation_tensor.sparse_map, 0)
-        input_shape = operator.activation_tensor.sparse_map.shape
-        input_shape = [dim for dim in input_shape if dim != 1]
-        new_shape = [-1, time_window_size]
-        new_shape.extend(input_shape[1:])
-        input_tensor = operator.activation_tensor.sparse_map.reshape(new_shape)
-        input_tensor = input_tensor.sum(dim=1)
-        if isinstance(operator, FC):
-            if len(input_tensor.shape) == 2:
-                # may not fully utilize systolic array if the first dimension is not 8
-                input_tensor = input_tensor.permute(1, 0).contiguous()
-            elif len(input_tensor.shape) == 3:
-                # the first dimension should be 8 to fully utilize the systolic array, change the second dimension to make first dimension 8
-                input_tensor = input_tensor.reshape([8, -1, input_tensor.shape[-1]])
-                input_tensor = input_tensor.permute(1, 2, 0).contiguous()
-            else:
-                raise Exception("unsupported input shape")
-            sequence_length = operator.sequence_length
-            input_dim = operator.input_dim
-            output_dim = operator.output_dim
-        elif isinstance(operator, Conv2D):
-            input_tensor = img2col(input_tensor, operator.kernel_size, operator.stride, operator.padding)
-            # the first dimension should be 8 to fully utilize the systolic array, change the second dimension to make first dimension 8
-            input_tensor = input_tensor.reshape([8, -1, input_tensor.shape[-1]])
-            input_tensor = input_tensor.permute(1, 2, 0).contiguous()
-            sequence_length = operator.output_H * operator.output_H
-            input_dim = operator.input_channel * operator.kernel_size * operator.kernel_size
-            output_dim = operator.output_channel
-        if False:
-            input_length = self.StSAP(input_tensor)
-        else:
-            input_length = np.prod(input_tensor.shape[:-1])
-        repeate_times = ceil_a_by_b(output_dim, 16)
-        stats.compute_cycles += input_length * repeate_times * (time_window_size) # one stage for leak and one stage for spike generate
-
-        num_cold_start = sequence_length
-        stats.compute_cycles += num_cold_start * 16 * 2
-
-        if self.accelerator.sram_size['act'] < operator.activation_tensor.get_size():
-            stats.reads['dram'] += operator.activation_tensor.get_size() * repeate_times
-        else:
-            stats.reads['dram'] += operator.activation_tensor.get_size()
-        stats.reads['dram'] += operator.weight_tensor.get_size()
-        stats.writes['dram'] += operator.output_tensor.get_size() // 8
-
-        init_mem_access = 16 * 8 * (8 + 4)
-        total_mem_access = stats.reads['dram'] + stats.writes['dram']
-        middle_mem_access = total_mem_access - init_mem_access
-        init_latency = init_mem_access // self.accelerator.mem_if_width
-        middle_latency = middle_mem_access // self.accelerator.mem_if_width
-        stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
-        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
-
-        total_elements.append(np.prod(input_tensor.shape[:-1]) * repeate_times)
-        processed_nnzs.append(input_length * repeate_times)
-
-
-        print(operator.name)
-        print("mem stall: ", stats.mem_stall_cycles)
-        print("total cycles: ", stats.total_cycles)
-
-        return stats
-    
-    def run_PTB_lif(self, operator: LIFNeuron):
-        stats = Stats()
-        stats.compute_cycles = operator.num_neuron * operator.time_steps * 3 // 16
-
-        stats.total_cycles = stats.compute_cycles
-        print(operator.name)
-        print("total cycles: ", stats.compute_cycles)
-        return stats
-
-
-
+    return preprocessed_act, prefix_array
 
 
                     
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='Simulator')
-    parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
+    parser.add_argument('--type', type=str, default='eyeriss', help='type of accelerator')
     parser.add_argument('--adder_array_size', type=int, default=128, help='size of adder array')
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')

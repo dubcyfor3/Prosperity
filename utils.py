@@ -1,5 +1,42 @@
 import math
 import torch
+
+class Stats:
+    def __init__(self):
+        self.total_cycles = 0
+        self.mem_stall_cycles = 0
+        self.compute_cycles = 0
+        self.num_ops = 0
+        self.LIF_latency = 0
+        self.preprocess_stall_cycles = 0
+        self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum']
+        self.reads = {space: 0 for space in self.mem_namespace}
+        self.writes = {space: 0 for space in self.mem_namespace}
+        self.original_sparsity = 0
+        self.processed_sparsity = 0
+        self.ops_sparsity = 0
+        self.rank_two_sparsity = 0
+        self.avg_rank_one_prefix = 0
+        self.avg_rank_two_prefix = 0
+        self.cycle_breakdown = None
+
+    def __add__(self, other):
+        if not isinstance(other, Stats):
+            raise Exception("unsupported type")
+        else:
+            added_stats = Stats()
+            added_stats.total_cycles = self.total_cycles # handle cycles manually
+            added_stats.mem_stall_cycles = self.mem_stall_cycles + other.mem_stall_cycles
+            added_stats.compute_cycles = self.compute_cycles + other.compute_cycles
+            added_stats.preprocess_stall_cycles = self.preprocess_stall_cycles + other.preprocess_stall_cycles
+            added_stats.num_ops = self.num_ops + other.num_ops
+            added_stats.LIF_latency = 0
+            added_stats.mem_namespace = self.mem_namespace
+            added_stats.reads = {space: self.reads[space] + other.reads[space] for space in self.mem_namespace}
+            added_stats.writes = {space: self.writes[space] + other.writes[space] for space in self.mem_namespace}
+            
+            return added_stats
+
 def ceil_a_by_b(a, b):
     return int(math.ceil(float(a) / b))
 
