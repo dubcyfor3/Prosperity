@@ -8,10 +8,62 @@ from utils import get_density, ceil_a_by_b
 from collections import defaultdict
 
 import seaborn as sns
+import heapq
 
-def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
-    cycles = 0
-    return cycles, optimal_cycles
+def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
+    M, K = tensor.shape
+    capacity = max_num_pattern
+    patterns = torch.zeros(capacity, K, dtype=torch.bool)
+    # 计算初始边的数量
+    V_A = set()
+    V = set(range(K))
+
+    # 使用NumPy来计算邻接矩阵
+    adj_matrix = np.zeros((max(M,K) + capacity, max(M,K) + capacity), dtype=bool)
+    adj_matrix[:K, :M] = tensor.T
+
+    def redundancy(v1: int, v2: int) -> int:
+        return np.sum(adj_matrix[v1] & adj_matrix[v2])
+
+    # 初始化堆和堆字典
+    heap = []
+    for v1 in range(K):
+        for v2 in range(v1 + 1, K):
+            r = redundancy(v1, v2)
+            if r > 1:
+                heapq.heappush(heap, (-r, (v1, v2)))
+
+    while len(V_A) < capacity and heap:
+        max_redundancy, (v1, v2) = heapq.heappop(heap)
+        max_redundancy = -max_redundancy
+        
+        if max_redundancy > 1:
+            w = max(M,K) + len(V_A)
+            common_neighbors = adj_matrix[v1] & adj_matrix[v2]
+            
+            # 更新邻接矩阵
+            adj_matrix[w] = common_neighbors
+
+            if v2 < K:
+                patterns[len(V_A), v1] = True
+                patterns[len(V_A), v2] = True
+            elif v1 < K:
+                patterns[len(V_A), v1] = True
+                patterns[len(V_A)] = patterns[len(V_A)] | patterns[v2 - max(M,K)]
+            else:
+                patterns[len(V_A)] = patterns[v1 - max(M,K)] | patterns[v2 - max(M,K)]
+            
+            V_A.add(w)
+
+            # 更新受影响的对的冗余度
+            for u in V.union(V_A) - {v1, v2, w}:               
+                r = redundancy(w, u)
+                if r > 1:
+                    heapq.heappush(heap, (-r, (u, w)))
+            heapq.heapify(heap)
+        else:
+            break
+    return patterns
 
 def binary_weighted_k_means(pattern_dict: dict, k: int=256, tile_size: int=32):
     # filter out patterns with less than 2 nonzeros
@@ -82,8 +134,8 @@ def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
         pattern_dict[nonzeros] += 1
     
     # print("number of unique patterns: ", len(pattern_dict))
-    pattern_tensor = binary_weighted_k_means(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
-
+    # pattern_tensor = binary_weighted_k_means(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
+    pattern_tensor = hag_pattern_analysis(tensor, max_num_pattern)
     # # sort according to value
     # sorted_pattern = sorted(pattern_dict.items(), key=lambda x: x[1], reverse=True)
     # selected_pattern = []
