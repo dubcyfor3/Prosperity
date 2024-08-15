@@ -9,6 +9,10 @@ from collections import defaultdict
 
 import seaborn as sns
 
+def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
+    cycles = 0
+    return cycles, optimal_cycles
+
 def binary_weighted_k_means(pattern_dict: dict, k: int=256, tile_size: int=32):
     # filter out patterns with less than 2 nonzeros
     pattern_dict = {k: v for k, v in pattern_dict.items() if len(k) > 1}
