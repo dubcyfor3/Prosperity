@@ -9,6 +9,7 @@ from collections import defaultdict
 
 import seaborn as sns
 import heapq
+from sklearn.cluster import KMeans
 
 def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
     M, K = tensor.shape
@@ -17,6 +18,7 @@ def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
     # 计算初始边的数量
     V_A = set()
     V = set(range(K))
+    # heap_dict = {}
 
     # 使用NumPy来计算邻接矩阵
     adj_matrix = np.zeros((max(M,K) + capacity, max(M,K) + capacity), dtype=bool)
@@ -32,10 +34,12 @@ def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
             r = redundancy(v1, v2)
             if r > 1:
                 heapq.heappush(heap, (-r, (v1, v2)))
+                # heap_dict[(v1, v2)] = -r
 
     while len(V_A) < capacity and heap:
         max_redundancy, (v1, v2) = heapq.heappop(heap)
         max_redundancy = -max_redundancy
+        # del heap_dict[(v1, v2)]
         
         if max_redundancy > 1:
             w = max(M,K) + len(V_A)
@@ -43,6 +47,10 @@ def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
             
             # 更新邻接矩阵
             adj_matrix[w] = common_neighbors
+            # adj_matrix[v1] &= ~common_neighbors
+            # adj_matrix[v2] &= ~common_neighbors
+            # adj_matrix[v1, w] = True
+            # adj_matrix[v2, w] = True
 
             if v2 < K:
                 patterns[len(V_A), v1] = True
@@ -55,15 +63,75 @@ def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
             
             V_A.add(w)
 
-            # 更新受影响的对的冗余度
-            for u in V.union(V_A) - {v1, v2, w}:               
+            # # 更新受影响的对的冗余度
+            # for u in V.union(V_A) - {v1, v2, w}:               
+            #     r = redundancy(w, u)
+            #     if r > 1:
+            #         heapq.heappush(heap, (-r, (u, w)))
+
+             # 更新受影响的对的冗余度
+            for u in V.union(V_A) - {v1, v2, w}:
+                # for v in (v1, v2):
+                #     smaller, larger = sorted((v, u))
+                #     if (smaller, larger) in heap_dict:
+                #         r = redundancy(smaller, larger)
+                #         old_r = heap_dict[(smaller, larger)]
+                #         heap.remove((old_r, (smaller, larger)))
+                #         if r > 1:
+                #             heapq.heappush(heap, (-r, (smaller, larger)))
+                #             heap_dict[(smaller, larger)] = -r
+                #         else:
+                #             del heap_dict[(smaller, larger)]
+                
                 r = redundancy(w, u)
                 if r > 1:
-                    heapq.heappush(heap, (-r, (u, w)))
+                    heapq.heappush(heap, (-r, (u,w)))
+                    # heap_dict[(min(u, w), max(u, w))] = -r
             heapq.heapify(heap)
         else:
             break
     return patterns
+
+def binary_weighted_k_meansplusplus(pattern_dict: dict, k: int = 256, tile_size: int = 32, max_iter: int = 10):
+    # Filter out patterns with less than 2 nonzeros
+    pattern_dict = {k: v for k, v in pattern_dict.items() if len(k) > 1}
+    
+    # Sort the pattern according to value
+    pattern_dict = dict(sorted(pattern_dict.items(), key=lambda x: x[1], reverse=True))
+
+    # Convert patterns to vectors
+    nodes = []
+    for key in pattern_dict.keys():
+        vec = torch.zeros(tile_size).to(torch.float32)
+        for index in key:
+            vec[index] = 1.0
+        nodes.append(vec)  # Convert to numpy array
+
+    if len(nodes) < k:
+        centroids = torch.zeros(k, tile_size).to(torch.float32)
+        for i in range(k):
+            if i < len(nodes):
+                centroids[i] = nodes[i].clone()
+            else:
+                centroids[i] = torch.zeros(tile_size).to(torch.float32)
+        return centroids
+    
+    nodes = torch.stack(nodes)
+
+    weights = list(pattern_dict.values())
+
+    # Run K-Means with K-Means++ initialization
+    kmeans = KMeans(n_clusters=k, init='k-means++', max_iter=max_iter, n_init=1, random_state=42)
+    kmeans.fit(nodes, sample_weight=weights)
+
+    # Get the resulting centroids and round them
+    centroids = kmeans.cluster_centers_
+    centroids = np.round(centroids).astype(np.bool_)
+
+    # Convert the centroids back to a PyTorch tensor
+    centroids = torch.tensor(centroids)
+
+    return centroids
 
 def binary_weighted_k_means(pattern_dict: dict, k: int=256, tile_size: int=32):
     # filter out patterns with less than 2 nonzeros
@@ -134,8 +202,8 @@ def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
         pattern_dict[nonzeros] += 1
     
     # print("number of unique patterns: ", len(pattern_dict))
-    # pattern_tensor = binary_weighted_k_means(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
-    pattern_tensor = hag_pattern_analysis(tensor, max_num_pattern)
+    # pattern_tensor_kmeans = binary_weighted_k_means(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
+    pattern_tensor_kmeanspp = binary_weighted_k_meansplusplus(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
     # # sort according to value
     # sorted_pattern = sorted(pattern_dict.items(), key=lambda x: x[1], reverse=True)
     # selected_pattern = []
@@ -153,23 +221,29 @@ def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
     #     for index in pattern[0]:
     #         pattern_tensor[i, index] = True
 
-    cycles = 0
+    cycles_kmeans = 0
+    cycles_kmeanspp = 0
     optimal_cycles = 0
     for i in range(tensor.shape[0]):
         row = tensor[i]
         nnz = torch.sum(row != 0).item()
         # perform bitwise xor with the selected pattern
-        hamming_dist = torch.sum(torch.logical_xor(pattern_tensor, row), dim=-1)
-        smallest_dist = torch.min(hamming_dist).item()
-        if smallest_dist + 1 < nnz:
-            cycles += smallest_dist + 1
+        # hamming_dist_kmeans = torch.sum(torch.logical_xor(pattern_tensor_kmeans, row), dim=-1)
+        # smallest_dist_kmeans = torch.min(hamming_dist_kmeans).item()
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row), dim=-1)
+        smallest_dist_kmeanspp = torch.min(hamming_dist_kmeanspp).item()
+        # if smallest_dist_kmeans + 1 < nnz:
+        #     cycles_kmeans += smallest_dist_kmeans + 1
+        # else:
+        #     cycles_kmeans += nnz
+        if smallest_dist_kmeanspp + 1 < nnz:
+            cycles_kmeanspp += smallest_dist_kmeanspp + 1
         else:
-            cycles += nnz
-
+            cycles_kmeanspp += nnz
         if nnz > 0:
             optimal_cycles += 1
 
-    return cycles, optimal_cycles
+    return cycles_kmeans, cycles_kmeanspp, optimal_cycles
 
 
 def product_sparsify_whole_matrix(input_tensor: torch.Tensor, tile_size_m = 256, tile_size_k = 16):
@@ -559,12 +633,13 @@ if __name__ == '__main__':
         tensor = layer.activation_tensor.sparse_map
         tensor = tensor.reshape(-1, tensor.shape[-1])
 
-        tile_size_k = 32
+        tile_size_k = 16
         prosperity_tensor, num_prefix = product_sparsify_whole_matrix(tensor, tile_size_k=16)
         prosperity_cycles = torch.sum(prosperity_tensor).item() + num_prefix
 
         original_cycles = torch.sum(tensor).item()
-        our_cycles = 0
+        our_cycles_kmeans = 0
+        our_cycles_kmeanspp = 0
         optimal_cycles = 0
         tile_size_m = 256
         for i in range(0, tensor.shape[1], tile_size_k):
@@ -572,8 +647,11 @@ if __name__ == '__main__':
                 cur_tile_size_k = min(tile_size_k, tensor.shape[1] - i)
                 cur_tile_size_m = min(tile_size_m, tensor.shape[0] - j)
                 tile = tensor[j:j+cur_tile_size_m, i:i+cur_tile_size_k]
-                (cur_tile_cycles, cur_tile_opt_cycles)= pattern_analysis(tile, max_num_pattern=64, cur_tile_size_k=cur_tile_size_k)
-                our_cycles += cur_tile_cycles
+                (cur_tile_cycles_kmeans, cur_tile_cycles_kmeanspp, cur_tile_opt_cycles) = pattern_analysis(tile, max_num_pattern = 256, cur_tile_size_k = cur_tile_size_k)
+                our_cycles_kmeans += cur_tile_cycles_kmeans
+                our_cycles_kmeanspp += cur_tile_cycles_kmeanspp
                 optimal_cycles += cur_tile_opt_cycles
 
-        print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles: ", our_cycles, "optimal cycles: ", optimal_cycles)
+        print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
+        # print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
+            
