@@ -9,6 +9,7 @@ from collections import defaultdict
 
 import seaborn as sns
 import heapq
+import pickle
 from sklearn.cluster import KMeans
 
 def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
@@ -177,6 +178,46 @@ def binary_weighted_k_means(pattern_dict: dict, k: int=256, tile_size: int=32):
     centroids = torch.stack(centroids).to(torch.bool)
     return centroids
 
+def find_patterns(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
+
+    pattern_dict = defaultdict(int)
+    for i in range(tensor.shape[0]):
+        row = tensor[i]
+        # convert row into nonzeros
+        nonzeros = torch.nonzero(row).flatten()
+        # convert to tuple
+        nonzeros = tuple(nonzeros.tolist())
+        pattern_dict[nonzeros] += 1
+    
+    pattern_tensor_kmeanspp = binary_weighted_k_meansplusplus(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
+
+    return pattern_tensor_kmeanspp
+
+def pattern_analysis_test(tensor: torch.Tensor, pattern_tensor_kmeanspp):
+
+    cycles_kmeanspp = 0
+    optimal_cycles = 0
+    for i in range(tensor.shape[0]):
+        row = tensor[i]
+        nnz = torch.sum(row != 0).item()
+        # perform bitwise xor with the selected pattern
+        # hamming_dist_kmeans = torch.sum(torch.logical_xor(pattern_tensor_kmeans, row), dim=-1)
+        # smallest_dist_kmeans = torch.min(hamming_dist_kmeans).item()
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row), dim=-1)
+        smallest_dist_kmeanspp = torch.min(hamming_dist_kmeanspp).item()
+        # if smallest_dist_kmeans + 1 < nnz:
+        #     cycles_kmeans += smallest_dist_kmeans + 1
+        # else:
+        #     cycles_kmeans += nnz
+        if smallest_dist_kmeanspp + 1 < nnz:
+            cycles_kmeanspp += smallest_dist_kmeanspp + 1
+        else:
+            cycles_kmeanspp += nnz
+        if nnz > 0:
+            optimal_cycles += 1
+
+    return cycles_kmeanspp, optimal_cycles
+
 def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
 
     # create a histogram of the number of nonzeros in each row
@@ -244,7 +285,6 @@ def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
             optimal_cycles += 1
 
     return cycles_kmeans, cycles_kmeanspp, optimal_cycles
-
 
 def product_sparsify_whole_matrix(input_tensor: torch.Tensor, tile_size_m = 256, tile_size_k = 16):
     input_tensor = input_tensor.reshape(-1, input_tensor.shape[-1])
@@ -617,11 +657,53 @@ def generate_random_matrix(m,k):
 if __name__ == '__main__':
     
     model = 'spikformer'
-    dataset = 'cifar100'
+    dataset_train = 'cifar10_train'
+    dataset_test = 'cifar10_test'
+    
+    batch_size = 128
+    tile_size_k = 16
+    max_num_pattern = 256
+    generate_pattern = False  # 设置为True以重新生成patterns
 
-    nn = create_network(model, 'data/{}_{}.pkl'.format(model, dataset))
+    nn_test = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_test))
 
-    for layer in nn:
+    # 根据tile_size_k和max_num_pattern构造文件名
+    pattern_file = 'data/spikformer_cifar10_patterns_b{}k{}m{}.pkl'.format(batch_size, tile_size_k, max_num_pattern)
+    
+    if generate_pattern:
+        nn_train = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_train))
+        patterns = defaultdict(dict)
+
+        for layer in nn_train:
+            if isinstance(layer, Conv2D):
+                layer = conv2d_2_fc(layer)
+            elif isinstance(layer, FC):
+                pass
+            else:
+                continue
+
+            tensor = layer.activation_tensor.sparse_map
+            tensor = tensor.reshape(-1, tensor.shape[-1])
+
+            for i in range(0, tensor.shape[1], tile_size_k):
+                cur_tile_size_k = min(tile_size_k, tensor.shape[1] - i)
+                tile = tensor[:, i:i+cur_tile_size_k]
+                patterns[layer.name][i] = find_patterns(tile, max_num_pattern, cur_tile_size_k)
+
+        # 将生成的patterns保存到文件中
+        with open(pattern_file, 'wb') as f:
+            pickle.dump(patterns, f)
+
+        print("Patterns have been generated and saved.")
+
+    else:
+        # 从文件中加载patterns
+        with open(pattern_file, 'rb') as f:
+            patterns = pickle.load(f)
+        
+        print("Patterns have been loaded from the file.")
+
+    for layer in nn_test:
         if isinstance(layer, Conv2D):
             layer = conv2d_2_fc(layer)
         elif isinstance(layer, FC):
@@ -629,29 +711,22 @@ if __name__ == '__main__':
         else:
             continue
 
-
         tensor = layer.activation_tensor.sparse_map
         tensor = tensor.reshape(-1, tensor.shape[-1])
 
-        tile_size_k = 16
         prosperity_tensor, num_prefix = product_sparsify_whole_matrix(tensor, tile_size_k=16)
         prosperity_cycles = torch.sum(prosperity_tensor).item() + num_prefix
 
         original_cycles = torch.sum(tensor).item()
-        our_cycles_kmeans = 0
         our_cycles_kmeanspp = 0
         optimal_cycles = 0
-        tile_size_m = 256
+
         for i in range(0, tensor.shape[1], tile_size_k):
-            for j in range(0, tensor.shape[0], tile_size_m):
-                cur_tile_size_k = min(tile_size_k, tensor.shape[1] - i)
-                cur_tile_size_m = min(tile_size_m, tensor.shape[0] - j)
-                tile = tensor[j:j+cur_tile_size_m, i:i+cur_tile_size_k]
-                (cur_tile_cycles_kmeans, cur_tile_cycles_kmeanspp, cur_tile_opt_cycles) = pattern_analysis(tile, max_num_pattern = 256, cur_tile_size_k = cur_tile_size_k)
-                our_cycles_kmeans += cur_tile_cycles_kmeans
-                our_cycles_kmeanspp += cur_tile_cycles_kmeanspp
-                optimal_cycles += cur_tile_opt_cycles
+            cur_tile_size_k = min(tile_size_k, tensor.shape[1] - i)
+            tile = tensor[:, i:i+cur_tile_size_k]
+            (cur_tile_cycles_kmeanspp, cur_tile_opt_cycles) = pattern_analysis_test(tile, patterns[layer.name][i])
+            our_cycles_kmeanspp += cur_tile_cycles_kmeanspp
+            optimal_cycles += cur_tile_opt_cycles
 
         print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
-        # print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
             

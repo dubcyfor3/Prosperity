@@ -72,7 +72,7 @@ def spikingBERT_config(dataset):
 def spikformer_config(dataset='cifar10'):
     if dataset == 'cifar10' or dataset == 'cifar100':
         dim = 384
-        batch_size = 1
+        batch_size = 128
         time_steps = 4
         depth = 4
         num_head = 12
