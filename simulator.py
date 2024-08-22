@@ -12,8 +12,11 @@ import os
 import networkx as nx
 from accelerator import Accelerator
 from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato
+import prosparsity_engine
 
 logging.basicConfig(level=logging.INFO)
+
+
 
 ori_nnzs = []
 processed_nnzs = []
@@ -22,6 +25,10 @@ ops_nnzs = []
 rank_two_nnzs = []
 rank_two_prefix = []
 total_elements = []
+num_all_zero_row = []
+num_EM_row = []
+num_PM_row = []
+num_other_row = []
 argmax_entries = 0
 
 def clear_global_stats():
@@ -32,6 +39,11 @@ def clear_global_stats():
     global rank_two_nnzs
     global rank_one_prefix
     global rank_two_prefix
+    global num_all_zero_row
+    global num_EM_row
+    global num_PM_row
+    global num_other_row
+
     ori_nnzs = []
     processed_nnzs = []
     total_elements = []
@@ -39,6 +51,10 @@ def clear_global_stats():
     rank_two_nnzs = []
     rank_one_prefix = []
     rank_two_prefix = []
+    num_all_zero_row = []
+    num_EM_row = []
+    num_PM_row = []
+    num_other_row = []
 
         
 
@@ -72,7 +88,7 @@ class Simulator:
         spike_stored_in_buffer = False
         for operator in self.network:
             if isinstance(operator, FC):
-                stats[operator.name] = self.run_fc(operator, spike_stored_in_buffer)
+                stats[operator.name] = self.run_fc_cuda(operator, spike_stored_in_buffer)
             elif isinstance(operator, Conv2D):
                 stats[operator.name] = self.run_conv2d(operator, spike_stored_in_buffer)
             elif isinstance(operator, LIFNeuron):
@@ -126,22 +142,23 @@ class Simulator:
         if self.accelerator.product_sparsity and self.track_sparsity_increment:
             original_sparsity = sum(ori_nnzs) / sum(total_elements)
             processed_sparsity = sum(processed_nnzs) / sum(total_elements)
-            ops_sparsity = sum(ops_nnzs) / sum(total_elements)
-            rank_two_sparsity = sum(rank_two_nnzs) / sum(total_elements)
+
             total_stats.original_sparsity = original_sparsity
             total_stats.processed_sparsity = processed_sparsity
-            total_stats.ops_sparsity = ops_sparsity
-            total_stats.rank_two_sparsity = rank_two_sparsity
+            print("bit density: ", original_sparsity)
+            print("prosparsity density: ", processed_sparsity)
             if self.test_rank_two:
+                # ops_sparsity = sum(ops_nnzs) / sum(total_elements)
+                # rank_two_sparsity = sum(rank_two_nnzs) / sum(total_elements)
+                # total_stats.ops_sparsity = ops_sparsity
+                # total_stats.rank_two_sparsity = rank_two_sparsity
                 avg_rank_one_prefix = sum(rank_one_prefix) / len(rank_one_prefix)
                 avg_rank_two_prefix = sum(rank_two_prefix) / len(rank_two_prefix)
                 total_stats.avg_rank_one_prefix = avg_rank_one_prefix
                 total_stats.avg_rank_two_prefix = avg_rank_two_prefix
 
-                print("original sparsity: ", original_sparsity)
-                print("processed sparsity: ", processed_sparsity)
-                print("ops sparsity: ", ops_sparsity)
-                print("rank two sparsity: ", rank_two_sparsity)
+                # print("ops sparsity: ", ops_sparsity)
+                # print("rank two sparsity: ", rank_two_sparsity)
 
         total_stats.cycle_breakdown = cycles_layer
         for key, value in cycles_layer.items():
@@ -149,8 +166,83 @@ class Simulator:
         
 
         return total_stats
-
     
+    def run_fc_cuda(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
+        stats = Stats()
+        assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
+        # only deal with batch size 1   
+        assert operator.time_steps * operator.sequence_length * operator.input_dim == operator.activation_tensor.sparse_map.numel()
+        # reshape activation tensor
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.reshape(operator.time_steps, operator.sequence_length, operator.input_dim)
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
+
+        input_shape = operator.activation_tensor.shape
+        input_shape = [np.prod(input_shape[:-1]), input_shape[-1]]
+        input_act = operator.activation_tensor.sparse_map.reshape(input_shape)
+        M, K, N = input_shape[0], input_shape[1], operator.weight_tensor.shape[1]
+
+        tile_size_N = self.accelerator.adder_array_size
+        tile_size_M = self.accelerator.SpMM_tile_size_M
+        tile_size_K = self.accelerator.SpMM_tile_size_K
+
+        tile_num_M = ceil_a_by_b(M, tile_size_M)
+        tile_num_K = ceil_a_by_b(K, tile_size_K)
+        tile_num_N = ceil_a_by_b(N, tile_size_N)
+
+        prosparsity_act, prefix_array = prosparsity_engine.find_product_sparsity(input_act)
+
+        stats.reads['dram'] = M * K * operator.activation_tensor.nbits * tile_num_N + K * N * operator.weight_tensor.nbits * tile_num_M
+        stats.writes['g_act'] = M * K * operator.activation_tensor.nbits * tile_num_N
+        stats.writes['g_wgt'] = K * N * operator.weight_tensor.nbits * tile_num_M
+
+        stats.reads['g_act'] = M * K * operator.activation_tensor.nbits * tile_num_N
+        stats.reads['g_wgt'] = torch.sum(prosparsity_act != 0).item() * N * operator.weight_tensor.nbits * tile_num_M
+        stats.writes['g_psum'] = M * N * operator.output_tensor.nbits * tile_num_K
+
+        # pad the input_act and prosparsity_act to the multiple of tile_size_K
+        pad_size = ceil_a_by_b(K, tile_size_K) * tile_size_K - K
+        input_act = torch.cat([input_act, torch.zeros(M, pad_size).to(input_act.device)], dim=-1)
+        prosparsity_act = torch.cat([prosparsity_act, torch.zeros(M, pad_size).to(prosparsity_act.device)], dim=-1)
+
+
+        prosparsity_act = prosparsity_act.reshape(-1, tile_size_K)
+        input_act = input_act.reshape(-1, tile_size_K)
+
+        # get all zero row
+        nnz_each_row_ori = torch.sum(input_act != 0, dim=-1)
+        all_zero_row_ori = nnz_each_row_ori == 0
+        nnz_each_row = torch.sum(prosparsity_act != 0, dim=-1)
+        all_zero_row = nnz_each_row == 0
+
+        compute_cycles = (torch.sum(prosparsity_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()) * tile_num_N
+        preprocess_cycles = get_prosparsity_cycles(input_act) + M // self.accelerator.num_popcnt
+
+
+        init_mem_access = 0
+        if not weight_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_N, N) * operator.weight_tensor.nbits # read the first tile from dram to buffer
+        if not spike_stored_in_buffer:
+            init_mem_access += min(tile_size_K, K) * min(tile_size_M, M)
+
+        total_mem_access = stats.reads['dram'] + stats.writes['dram']
+        middle_mem_access = total_mem_access - init_mem_access
+        init_latency = init_mem_access // self.accelerator.mem_if_width
+        middle_latency = middle_mem_access // self.accelerator.mem_if_width
+        stats.compute_cycles = max(compute_cycles, preprocess_cycles)
+        stats.preprocess_stall_cycles = max(0, preprocess_cycles - compute_cycles)
+        stats.mem_stall_cycles = init_latency + max(0, middle_latency - stats.compute_cycles)
+        stats.total_cycles = stats.compute_cycles + stats.mem_stall_cycles
+
+        ori_nnzs.append(torch.sum(input_act != 0).item() * tile_num_N) 
+        processed_nnzs.append(torch.sum(prosparsity_act != 0).item() * tile_num_N)
+        total_elements.append(M * K * tile_num_N)
+
+        print(operator.name)
+        print("compute cycles: ", compute_cycles)
+
+        return stats
+
+
     def run_fc(self, operator: FC, spike_stored_in_buffer=False, weight_stored_in_buffer=False):
         stats = Stats()
         assert operator.activation_tensor.shape[-1] == operator.weight_tensor.shape[0]
@@ -260,7 +352,11 @@ class Simulator:
                         this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
                         compute_cycles += max(this_compute_cycles, issue_cycles)
 
-                        
+
+                        num_all_zero_row.append(torch.sum(all_zero_row_ori).item())
+                        num_EM_row.append(torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item())
+                        num_PM_row.append(torch.sum(prefix_array != -1).item() - torch.sum(all_zero_row).item() + torch.sum(all_zero_row_ori).item())
+                        num_other_row.append(cur_tile_size_M - torch.sum(prefix_array != -1).item() - torch.sum(all_zero_row_ori).item())
 
                         preprocess_cycles += prosparsity_cycles
                         orginial_compute_cycles += torch.sum(cur_act != 0).item()
@@ -329,7 +425,7 @@ class Simulator:
     
     def run_conv2d(self, operator: Conv2D, spike_stored_in_buffer=False):
         eq_fc = conv2d_2_fc(operator)
-        return self.run_fc(eq_fc, spike_stored_in_buffer)
+        return self.run_fc_cuda(eq_fc, spike_stored_in_buffer)
     
     def run_maxpool(self, operator: MaxPool2D):
         # we ignore maxpool since it can be done light-weight when storing spike back to memory
@@ -406,7 +502,7 @@ class Simulator:
                         out_weight_stored_in_buffer = eq_fc_1.output_tensor.get_size() < self.accelerator.sram_size['wgt']
                         if not out_weight_stored_in_buffer:
                             stats.writes['dram'] += eq_fc_1.weight_tensor.get_size() // 8
-                        cur_stats_kv = self.run_fc(eq_fc_1, spike_stored_in_buffer, spike_stored_in_buffer)
+                        cur_stats_kv = self.run_fc_cuda(eq_fc_1, spike_stored_in_buffer, spike_stored_in_buffer)
                         stats.total_cycles += cur_stats_kv.total_cycles
                         stats.mem_stall_cycles += cur_stats_kv.mem_stall_cycles
                         stats.compute_cycles += cur_stats_kv.compute_cycles
@@ -421,7 +517,7 @@ class Simulator:
                         batch_size = 1
                         eq_fc_2 = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_2.activation_tensor.sparse_map = cur_act_q
-                        cur_stats_qkv = self.run_fc(eq_fc_2, spike_stored_in_buffer, out_weight_stored_in_buffer)
+                        cur_stats_qkv = self.run_fc_cuda(eq_fc_2, spike_stored_in_buffer, out_weight_stored_in_buffer)
                         stats.total_cycles += cur_stats_qkv.total_cycles
                         stats.mem_stall_cycles += cur_stats_qkv.mem_stall_cycles
                         stats.compute_cycles += cur_stats_qkv.compute_cycles
@@ -482,7 +578,7 @@ class Simulator:
                         eq_fc_qk = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_qk.activation_tensor.sparse_map = cur_act_k
                         
-                        cur_stats_qk = self.run_fc(eq_fc_qk, True, True)
+                        cur_stats_qk = self.run_fc_cuda(eq_fc_qk, True, True)
                         qk_cycles = cur_stats_qk.total_cycles
 
                         # softmax
@@ -502,7 +598,7 @@ class Simulator:
                         batch_size = 1
                         eq_fc_sv = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_sv.activation_tensor.sparse_map = cur_act_v
-                        cur_stats_sv = self.run_fc(eq_fc_sv, True, True)
+                        cur_stats_sv = self.run_fc_cuda(eq_fc_sv, True, True)
 
                         sv_cycles = cur_stats_sv.total_cycles
 
@@ -671,15 +767,17 @@ def find_product_sparsity(act: torch.Tensor):
                     
 if __name__ == '__main__':
 
+    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+
     parser = argparse.ArgumentParser(description='Simulator')
-    parser.add_argument('--type', type=str, default='eyeriss', help='type of accelerator')
+    parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
     parser.add_argument('--adder_array_size', type=int, default=128, help='size of adder array')
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--without_product_sparsity', action='store_true', default=False, help='without product sparsity')
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
-    parser.add_argument('--output_dir', type=str, default='output', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='DAC25', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
 
     args = parser.parse_args()
@@ -708,8 +806,8 @@ if __name__ == '__main__':
                        ]
     stats_list = []
 
-    run_ST = False
-    run_SCNN = False
+    run_ST = True
+    run_SCNN = True
     run_single_model = True
     model_list = ['lenet5_mnist'] # test set
     if run_ST:
@@ -742,6 +840,12 @@ if __name__ == '__main__':
         filename = '_'.join([str(e) for e in filename_element_list if e is not None])
         file_name = os.path.join(args.output_dir, filename + '.txt')
 
+        # avg_num_all_zero_row = np.mean(num_all_zero_row)
+        # avg_num_EM_row = np.mean(num_EM_row)
+        # avg_num_PM_row = np.mean(num_PM_row)
+        # avg_num_other_row = np.mean(num_other_row)
+        # avg_sum = avg_num_all_zero_row + avg_num_EM_row + avg_num_PM_row + avg_num_other_row
+
         with open(file_name, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
             f.write(f"total time: {stats.total_cycles / (500 * 1000 * 1000)}\n")
@@ -761,6 +865,11 @@ if __name__ == '__main__':
             f.write(f"wgt_write: {stats.writes['g_wgt']}\n")
             f.write(f"psum_read: {stats.reads['g_psum']}\n")
             f.write(f"psum_write: {stats.writes['g_psum']}\n")
+            # f.write(f"num_all_zero_row: {avg_num_all_zero_row}\n")
+            # f.write(f"num_EM_row: {avg_num_EM_row}\n")
+            # f.write(f"num_PM_row: {avg_num_PM_row}\n")
+            # f.write(f"num_other_row: {avg_num_other_row}\n")
+            # f.write(f"sum: {avg_sum}\n")
             # for key, value in stats.cycle_breakdown.items():
             #     f.write(f"{key}: {value / stats.total_cycles}\n")
             f.write("\n")
