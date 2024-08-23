@@ -1,6 +1,6 @@
 import pickle
 
-with open('data/vgg16_cifar100_train.pkl', 'rb') as f:
+with open('data/vgg16_cifar100_test.pkl', 'rb') as f:
     sparse_act = pickle.load(f)
 
     for i in range(len(sparse_act['Conv2d'])):
@@ -15,5 +15,5 @@ with open('data/vgg16_cifar100_train.pkl', 'rb') as f:
     del sparse_act['Linear']
 
     # 保存新的 sparse_act
-    with open('data/vgg16_cifar100_train.pkl', 'wb') as f:
+    with open('data/vgg16_cifar100_test.pkl', 'wb') as f:
         pickle.dump(sparse_act, f)
