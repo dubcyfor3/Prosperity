@@ -656,19 +656,20 @@ def generate_random_matrix(m,k):
 
 if __name__ == '__main__':
     
-    model = 'spikformer'
-    dataset_train = 'cifar10_train'
-    dataset_test = 'cifar10_test'
+    # model = 'spikformer'
+    model = 'vgg16'
+    dataset_train = 'cifar10dvs_train'
+    dataset_test = 'cifar10dvs_test'
     
     batch_size = 128
-    tile_size_k = 16
+    tile_size_k = 8
     max_num_pattern = 256
     generate_pattern = False  # 设置为True以重新生成patterns
 
     nn_test = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_test))
 
     # 根据tile_size_k和max_num_pattern构造文件名
-    pattern_file = 'data/spikformer_cifar10_patterns_b{}k{}m{}.pkl'.format(batch_size, tile_size_k, max_num_pattern)
+    pattern_file = 'data/vgg16_cifar10dvs_patterns_b{}k{}m{}.pkl'.format(batch_size, tile_size_k, max_num_pattern)
     
     if generate_pattern:
         nn_train = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_train))
@@ -729,4 +730,5 @@ if __name__ == '__main__':
             optimal_cycles += cur_tile_opt_cycles
 
         print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
+        # print("original cycles: ", original_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
             

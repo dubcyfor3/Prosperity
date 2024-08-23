@@ -184,6 +184,7 @@ def create_network(name, spike_info):
 
     with open(spike_info, 'rb') as f:
         sparse_act = pickle.load(f)
+
         for op in ops:
             if isinstance(op, Attention):
                 op.act_k_tensor.sparse_map = sparse_act[op.name + '_k'].contiguous()
@@ -221,7 +222,8 @@ def print_sparsity(network, spike_info):
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    nn = create_network('spikformer', 'data/spikformer_cifar10_train.pkl')
+    # nn = create_network('spikformer', 'data/spikformer_cifar10_train.pkl')
+    nn = create_network('spikformer', 'data/spikformer_cifar10dvs_test.pkl')
     ops, fc_ops, lif_ops = compute_num_OPS(nn)
     print("Total number of operations: ", ops)
     print("FC operations: ", fc_ops)

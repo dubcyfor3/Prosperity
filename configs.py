@@ -216,7 +216,7 @@ def resnet18_config():
     return resnet18_config
 
 def vgg16_config():
-    batch_size = 1
+    batch_size = 128
     time_steps = 32
     vgg16 = OrderedDict([
         ('conv2d_1', [32, 64, 64, 3, 1, 1, batch_size, time_steps]),
