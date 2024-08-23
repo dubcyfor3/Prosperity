@@ -9,14 +9,18 @@ This repository is the official implementation of Prosperity: Accelerating Spiki
 ## Setup
 
 clone the repository and install the requirements
-```bash
-todo
-```
 
 ```bash
 conda create -n prosperity python=3.10 -y
 conda activate prosperity
 pip install -r requirements.txt
+git submodule update --init
+```
+
+install prosperity CUDA kernel
+```bash
+cd kernel
+python setup.py install
 ```
 
 Usage
