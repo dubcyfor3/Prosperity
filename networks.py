@@ -223,7 +223,7 @@ def print_sparsity(network, spike_info):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
     # nn = create_network('spikformer', 'data/spikformer_cifar10_train.pkl')
-    nn = create_network('spikformer', 'data/spikformer_cifar10dvs_test.pkl')
+    nn = create_network('spikformer', 'data/spikformer_cifar10_test.pkl')
     ops, fc_ops, lif_ops = compute_num_OPS(nn)
     print("Total number of operations: ", ops)
     print("FC operations: ", fc_ops)
