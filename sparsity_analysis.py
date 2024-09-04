@@ -11,6 +11,7 @@ import seaborn as sns
 import heapq
 import pickle
 from sklearn.cluster import KMeans
+from collections import deque
 
 def hag_pattern_analysis(tensor: torch.Tensor, max_num_pattern):
     M, K = tensor.shape
@@ -193,30 +194,267 @@ def find_patterns(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
 
     return pattern_tensor_kmeanspp
 
+def pattern_analysis_test_bank(tensor: torch.Tensor, pattern_tensor_kmeanspp):
+
+    num_pe_groups = 8  # 并行处理的行数
+    bank_count_w = 4  # 内存bank的数量
+    bank_count_p = 4  # pattern bank的数量
+    K = tensor.shape[1]  # 列数
+
+    # Step 1: 计算整体的 result_matrix
+    result_matrix = torch.zeros_like(tensor)
+    for group_start in range(0, tensor.shape[0], num_pe_groups):
+        group_end = min(group_start + num_pe_groups, tensor.shape[0])
+        group = tensor[group_start:group_end]  # 取出8行或剩余行
+
+        # 计算当前8行的平均值，并进行四舍五入以得到一个代表行
+        group_nonzero = torch.any(group != 0, dim=1)
+        group_nonzero = group[group_nonzero]  # 只保留非零行
+        if group_nonzero.shape[0] == 0:
+            continue  # 如果全是零行，跳过
+        row_avg = torch.round(torch.mean(group_nonzero.float(), dim=0)).to(torch.bool)
+
+        # 计算与kmeans++模式的汉明距离
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row_avg), dim=-1)
+        smallest_dist_kmeanspp, idx = torch.min(hamming_dist_kmeanspp, dim=0)
+        pattern = pattern_tensor_kmeanspp[idx]  # 选择最接近的pattern
+
+        # 计算每一行的 result_matrix
+        for i, row in enumerate(group):
+            nnz = torch.sum(row != 0).item()  # 计算非零元素数量
+            hamming_dist = torch.sum(torch.logical_xor(pattern, row)).item()  # 计算当前行的汉明距离
+
+            # 根据条件选择保留的行
+            if hamming_dist + 1 < nnz:
+                result_matrix[group_start + i] = torch.logical_xor(pattern, row)  # 保留异或结果
+            else:
+                result_matrix[group_start + i] = row  # 保留原始行
+
+    # Step 2: 统计周期数
+    cycles = 0
+    stall_cycles = 0
+    row_queue = deque([i for i in range(num_pe_groups, result_matrix.shape[0]) if torch.sum(result_matrix[i]) > 0])  # 只保留非全零行的索引
+
+    # 初始化处理的8行
+    active_rows = list(range(num_pe_groups))  # 取出 result_matrix 的前8行
+    active_matrix = result_matrix[active_rows]
+
+    # 初始化每行的下一个非零元素所在列索引和阻塞次数
+    next_col = torch.full((active_matrix.shape[0],), active_matrix.shape[1])  # 初始值为列的数量
+    stall_count = torch.zeros(active_matrix.shape[0], dtype=torch.int)
+
+    # 计算每行第一个非零元素的列索引
+    for i, row in enumerate(active_matrix):
+        nonzero_indices = torch.nonzero(row).flatten()
+        if len(nonzero_indices) > 0:
+            next_col[i] = nonzero_indices[0]  # 指向第一个非零元素所在的列
+
+    # 主循环，直到所有行的非零元素都被处理
+    while torch.any(next_col < active_matrix.shape[1]) or row_queue:
+        success = torch.full((len(active_rows),), False)  # 用于记录当前周期每行是否成功访问
+        bank_access = [-1] * bank_count_w  # 用于记录当前周期每个bank的访问行和列
+        for i, col in enumerate(next_col):
+            if col < active_matrix.shape[1]:
+                bank_index = col % bank_count_w  # 计算当前列属于哪个bank
+                if bank_access[bank_index] == -1:
+                    bank_access[bank_index] = (i, col)  # 记录访问该bank的行和列
+                    success[i] = True
+                elif bank_access[bank_index][1] == col:
+                    success[i] = True
+                else:
+                    # 如果发生冲突，比较阻塞次数，阻塞次数多的优先；若相同则索引小的优先
+                    prev_row, prev_col = bank_access[bank_index]
+                    if stall_count[i] > stall_count[prev_row] or (stall_count[i] == stall_count[prev_row] and i < prev_row):
+                        # 当前行优先，原先的行被阻塞
+                        stall_count[prev_row] += 1
+                        bank_access[bank_index] = (i, col)
+                    else:
+                        # 当前行被阻塞
+                        stall_count[i] += 1
+
+        # 增加周期，并更新所有未被阻塞的行的列索引
+        cycles += 1
+        for i, col in enumerate(next_col):
+            if col < active_matrix.shape[1] and success[i]:
+                # 更新到下一个非零元素
+                nonzero_indices = torch.nonzero(active_matrix[i]).flatten()
+                next_nonzero_idx = torch.searchsorted(nonzero_indices, col + 1)
+                if next_nonzero_idx < len(nonzero_indices):
+                    next_col[i] = nonzero_indices[next_nonzero_idx]
+                else:
+                    next_col[i] = active_matrix.shape[1]  # 该行处理完毕
+                    continue
+
+            # 检查是否有行处理完，如果有则从队列中取新的行替代
+            if next_col[i] >= active_matrix.shape[1] and active_rows[i] != -1:
+                if row_queue:
+                    next_row = row_queue.popleft()
+                    active_rows[i] = next_row
+                    active_matrix[i] = result_matrix[next_row]
+
+                    # 重新初始化 next_col
+                    nonzero_indices = torch.nonzero(result_matrix[next_row]).flatten()
+                    if len(nonzero_indices) > 0:
+                        next_col[i] = nonzero_indices[0]
+                    else:
+                        next_col[i] = result_matrix.shape[1]
+                    stall_count[i] = 0  # 重置阻塞次数
+                else:
+                    active_rows[i] = -1  # 标记该行已经完成
+
+        # 统计阻塞次数
+        stall_cycles += torch.sum(stall_count).item()
+
+    return cycles, stall_cycles
+
+
+def pattern_analysis_test_parallel(tensor: torch.Tensor, pattern_tensor_kmeanspp):
+
+    num_pe_groups = 32  # 并行处理的行数
+    cycles = 0
+
+    for group_start in range(0, tensor.shape[0], num_pe_groups):
+        group_end = min(group_start + num_pe_groups, tensor.shape[0])
+        group = tensor[group_start:group_end]  # 取出8行或剩余行
+
+        # 计算当前8行的平均值，并进行四舍五入以得到一个代表行
+        group_nonzero = torch.any(group != 0, dim=1)
+        group_nonzero = group[group_nonzero]  # 只保留非零行
+        row_avg = torch.round(torch.mean(group_nonzero.float(), dim=0)).to(torch.bool)
+
+        # 计算与kmeans++模式的汉明距离
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row_avg), dim=-1)
+        smallest_dist_kmeanspp, idx = torch.min(hamming_dist_kmeanspp, dim=0)
+        pattern = pattern_tensor_kmeanspp[idx]  # 选择最接近的pattern
+
+        # 初始化结果矩阵，用于存储每个row的选择结果
+        result_matrix = torch.zeros_like(group)
+
+        for i, row in enumerate(group):
+            nnz = torch.sum(row != 0).item()  # 计算非零元素数量
+            hamming_dist = torch.sum(torch.logical_xor(pattern, row)).item()  # 计算当前行的汉明距离
+
+            # 根据条件选择保留的行
+            if hamming_dist + 1 < nnz:
+                result_matrix[i] = torch.logical_xor(pattern, row)  # 保留异或结果
+            else:
+                result_matrix[i] = row  # 保留原始行
+
+        # 统计result_matrix中非零元素的列数
+        non_zero_columns = torch.any(result_matrix != 0, dim=0)
+        cycles += torch.sum(non_zero_columns).item() + 1  # 非零列数即为cycle数
+
+    return cycles
+
 def pattern_analysis_test(tensor: torch.Tensor, pattern_tensor_kmeanspp):
 
+    num_pe_groups = 8
     cycles_kmeanspp = 0
     optimal_cycles = 0
-    for i in range(tensor.shape[0]):
-        row = tensor[i]
-        nnz = torch.sum(row != 0).item()
+    # non_zero_mask = torch.any(tensor != 0, dim=1)
+    # tensor = tensor[non_zero_mask]
+    for group_start in range(0, tensor.shape[0], num_pe_groups):
+        group_end = min(group_start + num_pe_groups, tensor.shape[0])
+        group = tensor[group_start:group_end]
+        group_nonzero = torch.any(group != 0, dim=1)
+        group_nonzero = group[group_nonzero]
+        row_avg = torch.round(torch.mean(group_nonzero.float(), dim=0)).to(torch.bool)
         # perform bitwise xor with the selected pattern
         # hamming_dist_kmeans = torch.sum(torch.logical_xor(pattern_tensor_kmeans, row), dim=-1)
         # smallest_dist_kmeans = torch.min(hamming_dist_kmeans).item()
-        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row), dim=-1)
-        smallest_dist_kmeanspp = torch.min(hamming_dist_kmeanspp).item()
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row_avg), dim=-1)
+        smallest_dist_kmeanspp, idx = torch.min(hamming_dist_kmeanspp, dim=0)
+        pattern = pattern_tensor_kmeanspp[idx]
         # if smallest_dist_kmeans + 1 < nnz:
         #     cycles_kmeans += smallest_dist_kmeans + 1
         # else:
         #     cycles_kmeans += nnz
+        # if smallest_dist_kmeanspp + 1 < nnz:
+        #     cycles_kmeanspp += smallest_dist_kmeanspp + 1
+        # else:
+        #     cycles_kmeanspp += nnz
+        # if nnz > 0:
+        #     optimal_cycles += 1
+
+        for row in group:
+            nnz = torch.sum(row != 0).item()
+            hamming_dist = torch.sum(torch.logical_xor(pattern, row)).item()
+            if hamming_dist + 1 < nnz:
+                cycles_kmeanspp += hamming_dist + 1
+            else:
+                cycles_kmeanspp += nnz
+            if nnz > 0:
+                optimal_cycles += 1
+
+    return cycles_kmeanspp, optimal_cycles
+
+def pattern_analysis_test_count(idx, tensor: torch.Tensor, pattern_tensor_kmeanspp):
+
+    cycles_kmeanspp = 0
+    optimal_cycles = 0
+    
+    # 初始化一个字典来跟踪每个 pattern 被使用的次数
+    pattern_usage_count = {i: 0 for i in range(pattern_tensor_kmeanspp.shape[0])}
+
+    for i in range(tensor.shape[0]):
+        row = tensor[i]
+        nnz = torch.sum(row != 0).item()
+
+        # 计算与所有 patterns 的汉明距离
+        hamming_dist_kmeanspp = torch.sum(torch.logical_xor(pattern_tensor_kmeanspp, row), dim=-1)
+        
+        # 找到与当前行最近的 pattern
+        smallest_dist_kmeanspp, pattern_idx = torch.min(hamming_dist_kmeanspp, dim=0)
+        smallest_dist_kmeanspp = smallest_dist_kmeanspp.item()
+        pattern_idx = pattern_idx.item()
+
+
+
+        # 计算 cycles
         if smallest_dist_kmeanspp + 1 < nnz:
             cycles_kmeanspp += smallest_dist_kmeanspp + 1
+            # 更新该 pattern 的使用次数
+            pattern_usage_count[pattern_idx] += 1
         else:
             cycles_kmeanspp += nnz
+
         if nnz > 0:
             optimal_cycles += 1
 
+    # 找到使用次数最多的五个 patterns
+    top_5_patterns = sorted(pattern_usage_count.items(), key=lambda x: x[1], reverse=True)[:5]
+
+    # 输出使用次数最多的五个 patterns 及其使用次数
+    if idx == 0:
+        print("Top 5 most used patterns and their usage counts:")
+        for idx, count in top_5_patterns:
+            pattern_value = pattern_tensor_kmeanspp[idx]
+            print(f"Pattern: {pattern_value.int()} - Used {count} times")
+        # plot the pattern usage count in a histogram
+        plt.figure(figsize=(10, 6))
+        plt.bar(range(len(pattern_usage_count)), list(pattern_usage_count.values()))
+        plt.xlabel('Patterns')
+        plt.ylabel('Usage Count')
+        plt.title('Pattern Usage Frequency')
+        plt.xticks(rotation=90, fontsize=8)
+        plt.savefig('pattern_usage_count.png')
+
     return cycles_kmeanspp, optimal_cycles
+
+def find_patterns_time_average(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
+
+    pattern_dict = defaultdict(int)
+    for i in range(tensor.shape[0]):
+        row = tensor[i]
+        # convert row into nonzeros
+        nonzeros = torch.nonzero(row).flatten()
+        # convert to tuple
+        nonzeros = tuple(nonzeros.tolist())
+        pattern_dict[nonzeros] += 1
+    
+    pattern_tensor_kmeanspp = binary_weighted_k_meansplusplus(pattern_dict, k=max_num_pattern, tile_size=cur_tile_size_k)
+
+    return pattern_tensor_kmeanspp
 
 def pattern_analysis(tensor: torch.Tensor, max_num_pattern, cur_tile_size_k):
 
@@ -658,21 +896,20 @@ if __name__ == '__main__':
     
     # model = 'spikformer'
     model = 'vgg16'
-    dataset_train = 'cifar100_train'
-    dataset_test = 'cifar100_test'
+    dataset = 'cifar10'
     
     batch_size = 128
-    tile_size_k = 8
-    max_num_pattern = 256
+    tile_size_k = 16
+    max_num_pattern = 512
     generate_pattern = False  # 设置为True以重新生成patterns
 
-    nn_test = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_test))
+    nn_test = create_network(model, 'data/{}_{}_test.pkl'.format(model, dataset))
 
     # 根据tile_size_k和max_num_pattern构造文件名
-    pattern_file = 'data/vgg16_cifar100_patterns_b{}k{}m{}.pkl'.format(batch_size, tile_size_k, max_num_pattern)
+    pattern_file = 'data/{}_{}_patterns_b{}k{}m{}.pkl'.format(model, dataset, batch_size, tile_size_k, max_num_pattern)
     
     if generate_pattern:
-        nn_train = create_network(model, 'data/{}_{}.pkl'.format(model, dataset_train))
+        nn_train = create_network(model, 'data/{}_{}_train.pkl'.format(model, dataset))
         patterns = defaultdict(dict)
 
         for layer in nn_train:
@@ -711,8 +948,9 @@ if __name__ == '__main__':
             pass
         else:
             continue
-
+        
         tensor = layer.activation_tensor.sparse_map
+        tensor = tensor.transpose(0, 1)
         tensor = tensor.reshape(-1, tensor.shape[-1])
 
         prosperity_tensor, num_prefix = product_sparsify_whole_matrix(tensor, tile_size_k=16)
@@ -725,10 +963,10 @@ if __name__ == '__main__':
         for i in range(0, tensor.shape[1], tile_size_k):
             cur_tile_size_k = min(tile_size_k, tensor.shape[1] - i)
             tile = tensor[:, i:i+cur_tile_size_k]
-            (cur_tile_cycles_kmeanspp, cur_tile_opt_cycles) = pattern_analysis_test(tile, patterns[layer.name][i])
+            cur_tile_cycles_kmeanspp, stall_cycles = pattern_analysis_test_bank(tile, patterns[layer.name][i])
             our_cycles_kmeanspp += cur_tile_cycles_kmeanspp
-            optimal_cycles += cur_tile_opt_cycles
+            # optimal_cycles += cur_tile_opt_cycles
 
-        print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
+        print("original cycles: ", original_cycles, "prosperity cycles: ", prosperity_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "stall cycles: ", stall_cycles)
         # print("original cycles: ", original_cycles, "our cycles kmeanspp: ", our_cycles_kmeanspp, "optimal cycles: ", optimal_cycles)
             
