@@ -2,7 +2,7 @@
 trash_can/
 output/
 .vscode
-
+*.pkl
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
