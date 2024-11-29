@@ -186,15 +186,15 @@ def StSAP(act: torch.Tensor):
     return total_length
 
 def run_eyeriss_conv_fc(operator: Union[FC, Conv2D, LIFNeuron]):
-    # a 16 x 8 systolic array, weight stationary
+    # a 16 x 8 systolic array, weight stationary 14 * 12
     stats = Stats()
     if isinstance(operator, FC):
-        stats.compute_cycles += operator.output_dim // 8 * operator.input_dim // 16 * operator.batch_size * operator.time_steps * operator.sequence_length
+        stats.compute_cycles += operator.output_dim // 12 * operator.input_dim // 14 * operator.batch_size * operator.time_steps * operator.sequence_length
     elif isinstance(operator, Conv2D):
         eq_fc = conv2d_2_fc(operator)
-        stats.compute_cycles += eq_fc.output_dim // 8 * eq_fc.input_dim // 16 * eq_fc.batch_size * eq_fc.time_steps * eq_fc.sequence_length
+        stats.compute_cycles += eq_fc.output_dim // 12 * eq_fc.input_dim // 14 * eq_fc.batch_size * eq_fc.time_steps * eq_fc.sequence_length
     elif isinstance(operator, LIFNeuron):
-        stats.compute_cycles += (operator.time_steps // 8) * operator.num_neuron * operator.batch_size // 16
+        stats.compute_cycles += (operator.time_steps // 12) * operator.num_neuron * operator.batch_size // 14
     else:
         pass
     stats.total_cycles = stats.compute_cycles
@@ -205,7 +205,7 @@ def run_eyeriss_conv_fc(operator: Union[FC, Conv2D, LIFNeuron]):
 def run_eyeriss_layernorm(operator: LayerNorm):
     stats = Stats()
     num_ops = operator.activation_tensor.get_size() + (operator.activation_tensor.get_size() // operator.dim) * 2 + operator.activation_tensor.get_size() + operator.activation_tensor.get_size()
-    stats.compute_cycles += num_ops // 128
+    stats.compute_cycles += num_ops // 168
     stats.total_cycles = stats.compute_cycles
     print(operator.name)
     print("total cycles: ", stats.total_cycles)
@@ -215,14 +215,14 @@ def run_eyeriss_attention(operator: Attention):
     stats = Stats()
     if operator.attention_type == 'spikformer' or operator.attention_type == 'spikebert':
         num_ops = operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.dim_per_head * operator.time_steps * 2
-        stats.compute_cycles += num_ops // 128
+        stats.compute_cycles += num_ops // 168
     elif operator.attention_type == 'sdt':
         num_ops = operator.sequence_length * operator.dim_per_head * operator.batch_size * operator.time_steps * operator.num_head * 4
-        stats.compute_cycles += num_ops // 128
+        stats.compute_cycles += num_ops // 168
     elif operator.attention_type == 'spikingbert':
         num_ops = operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.dim_per_head * operator.time_steps * 2
         num_ops += operator.sequence_length * operator.sequence_length * operator.batch_size * operator.num_head * operator.time_steps * 2 + operator.sequence_length * operator.batch_size * operator.num_head * operator.time_steps
-        stats.compute_cycles += num_ops // 128
+        stats.compute_cycles += num_ops // 168
     else:
         raise Exception("unsupported attention type")
     
