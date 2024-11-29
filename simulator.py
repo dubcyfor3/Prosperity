@@ -11,7 +11,7 @@ import argparse
 import os
 import networkx as nx
 from accelerator import Accelerator
-from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato
+from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato, run_simulation_MINT, run_simulation_LoAS
 import prosparsity_engine
 
 logging.basicConfig(level=logging.INFO)
@@ -74,6 +74,10 @@ class Simulator:
             stats = run_simulation_eyeriss(self.network)
         elif self.accelerator.type == 'SATO':
             stats = run_simulation_sato(self.network)
+        elif self.accelerator.type == 'MINT':
+            stats = run_simulation_MINT(self.network)
+        elif self.accelerator.type == 'LoAS':
+            stats = run_simulation_LoAS(self.network)
         elif self.accelerator.type == 'Prosperity':
             stats = self.run_simulation()
         else:
@@ -502,7 +506,7 @@ class Simulator:
                         out_weight_stored_in_buffer = eq_fc_1.output_tensor.get_size() < self.accelerator.sram_size['wgt']
                         if not out_weight_stored_in_buffer:
                             stats.writes['dram'] += eq_fc_1.weight_tensor.get_size() // 8
-                        cur_stats_kv = self.run_fc_cuda(eq_fc_1, spike_stored_in_buffer, spike_stored_in_buffer)
+                        cur_stats_kv = self.run_fc(eq_fc_1, spike_stored_in_buffer, spike_stored_in_buffer)
                         stats.total_cycles += cur_stats_kv.total_cycles
                         stats.mem_stall_cycles += cur_stats_kv.mem_stall_cycles
                         stats.compute_cycles += cur_stats_kv.compute_cycles
@@ -517,7 +521,7 @@ class Simulator:
                         batch_size = 1
                         eq_fc_2 = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_2.activation_tensor.sparse_map = cur_act_q
-                        cur_stats_qkv = self.run_fc_cuda(eq_fc_2, spike_stored_in_buffer, out_weight_stored_in_buffer)
+                        cur_stats_qkv = self.run_fc(eq_fc_2, spike_stored_in_buffer, out_weight_stored_in_buffer)
                         stats.total_cycles += cur_stats_qkv.total_cycles
                         stats.mem_stall_cycles += cur_stats_qkv.mem_stall_cycles
                         stats.compute_cycles += cur_stats_qkv.compute_cycles
@@ -578,7 +582,7 @@ class Simulator:
                         eq_fc_qk = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_qk.activation_tensor.sparse_map = cur_act_k
                         
-                        cur_stats_qk = self.run_fc_cuda(eq_fc_qk, True, True)
+                        cur_stats_qk = self.run_fc(eq_fc_qk, True, True)
                         qk_cycles = cur_stats_qk.total_cycles
 
                         # softmax
@@ -598,7 +602,7 @@ class Simulator:
                         batch_size = 1
                         eq_fc_sv = FC(name, input_dim, output_dim, sequence_length, batch_size, time_steps)
                         eq_fc_sv.activation_tensor.sparse_map = cur_act_v
-                        cur_stats_sv = self.run_fc_cuda(eq_fc_sv, True, True)
+                        cur_stats_sv = self.run_fc(eq_fc_sv, True, True)
 
                         sv_cycles = cur_stats_sv.total_cycles
 
@@ -777,7 +781,7 @@ if __name__ == '__main__':
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--without_product_sparsity', action='store_true', default=False, help='without product sparsity')
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
-    parser.add_argument('--output_dir', type=str, default='DAC25', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='artifact_eval', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
 
     args = parser.parse_args()
@@ -808,8 +812,8 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = True
-    model_list = ['lenet5_mnist'] # test set
+    run_single_model = False
+    model_list = ["lenet5_mnist"] # test set
     if run_ST:
         model_list.extend(ST_model_list)
     if run_SCNN:
@@ -820,7 +824,7 @@ if __name__ == '__main__':
     for name in model_list:
         clear_global_stats()
         model_name = name.split('_')[0]
-        spike_info_path = 'data/' + name + '.pkl'
+        spike_info_path = "data/" + name + ".pkl"
         nn = create_network(model_name, spike_info_path)
 
         sim = Simulator(accelerator, nn)

@@ -4,6 +4,7 @@ from networks import Conv2D, FC, LIFNeuron, Attention, LayerNorm, conv2d_2_fc
 from collections import OrderedDict
 import numpy as np
 from typing import Union
+import prosparsity_engine
 
 
 def run_simulation_sato(network):
@@ -43,6 +44,22 @@ def run_simulation_eyeriss(network):
     print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
     return total_stats
 
+def run_simulation_LoAS(network):
+    stats = Stats()
+    original_pseudo_acc = 0
+    prosparsity_pseudo_acc = 0
+    for operator in network:
+        if isinstance(operator, Conv2D) or isinstance(operator, FC):
+            ori_acc, prosparsity_acc = run_LoAS_convfc(operator)
+    
+            original_pseudo_acc += ori_acc
+            prosparsity_pseudo_acc += prosparsity_acc
+
+    print("original pseudo acc: ", original_pseudo_acc)
+    print("prosparsity pseudo acc: ", prosparsity_pseudo_acc)
+    print("acc reduction: ", prosparsity_pseudo_acc / original_pseudo_acc)
+    return stats
+
 def run_simulation_PTB(network):
     stats = OrderedDict()
     for operator in network:
@@ -60,6 +77,78 @@ def run_simulation_PTB(network):
     print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
     return total_stats
 
+def run_simulation_MINT(network):
+    stats = OrderedDict()
+    for operator in network:
+        if isinstance(operator, Conv2D) or isinstance(operator, FC):
+            stats[operator.name] = run_MINT_convfc(operator)
+        elif isinstance(operator, LIFNeuron):
+            stats[operator.name] = run_PTB_lif(operator)
+    
+    total_stats = Stats()
+    for key, value in stats.items():
+        total_stats += value
+        total_stats.total_cycles += value.total_cycles
+
+    print("total cycles: ", total_stats.total_cycles)
+    print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
+    return total_stats
+
+
+def run_LoAS_convfc(operator: Union[FC, Conv2D]):
+
+    if isinstance(operator, Conv2D):
+        eq_fc = conv2d_2_fc(operator)
+    elif isinstance(operator, FC):
+        eq_fc = operator
+
+    input_tensor = eq_fc.activation_tensor.sparse_map.clone()
+
+    input_tensor = input_tensor.reshape(eq_fc.time_steps, eq_fc.sequence_length, eq_fc.input_dim)
+    # pad the time step into power of 2
+    input_tensor = pad_to_power_of_2(input_tensor, 0)
+
+
+    time_step_group = 4
+
+    input_tensor = input_tensor.reshape(time_step_group, -1, eq_fc.sequence_length, eq_fc.input_dim)
+    input_tensor = input_tensor.sum(dim=1).to(torch.bool)
+    # swap the first two dimension
+    input_tensor = input_tensor.permute(1, 0, 2).contiguous()
+    input_tensor = input_tensor.reshape(-1, eq_fc.input_dim)
+
+    prosparsity_act, prefix = prosparsity_engine.find_product_sparsity(input_tensor)
+
+    original_pseudo_acc = torch.sum(input_tensor).item() * eq_fc.output_dim
+    prosparsity_pseudo_acc = torch.sum(prosparsity_act).item() * eq_fc.output_dim
+
+    return original_pseudo_acc, prosparsity_pseudo_acc
+
+
+def run_MINT_convfc(operator: Union[FC, Conv2D]):
+
+    stats = Stats()
+    if isinstance(operator, Conv2D):
+        eq_fc = conv2d_2_fc(operator)
+    elif isinstance(operator, FC):
+        eq_fc = operator
+    else:
+        raise Exception("unsupported operator")
+    
+    num_PE = 128
+
+    input_tensor = eq_fc.activation_tensor.sparse_map.clone()
+    input_tensor = input_tensor.reshape(eq_fc.time_steps, eq_fc.sequence_length, eq_fc.input_dim)
+
+    compute_cycles = input_tensor.sum().item() * ceil_a_by_b(eq_fc.output_dim, num_PE)
+
+    stats.compute_cycles = compute_cycles
+    stats.total_cycles = compute_cycles
+
+    print(operator.name)
+    print("total cycles: ", stats.total_cycles)
+
+    return stats
 
 def StSAP(act: torch.Tensor):
     # systolic array of size 16x8
@@ -110,7 +199,7 @@ def run_eyeriss_conv_fc(operator: Union[FC, Conv2D, LIFNeuron]):
         pass
     stats.total_cycles = stats.compute_cycles
     print(operator.name)
-    print("total cycles: ", stats.compute_cycles)
+    print("total cycles: ", stats.total_cycles)
     return stats
 
 def run_eyeriss_layernorm(operator: LayerNorm):
@@ -119,7 +208,7 @@ def run_eyeriss_layernorm(operator: LayerNorm):
     stats.compute_cycles += num_ops // 128
     stats.total_cycles = stats.compute_cycles
     print(operator.name)
-    print("total cycles: ", stats.compute_cycles)
+    print("total cycles: ", stats.total_cycles)
     return stats
 
 def run_eyeriss_attention(operator: Attention):
