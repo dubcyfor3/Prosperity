@@ -92,6 +92,59 @@ def pad_to_power_of_2(tensor, dim):
     
     return torch.nn.functional.pad(tensor, pad_shape)
 
+import pandas as pd
+
+def read_position(file_name, column_name, row_name):
+    try:
+        # Read the CSV file
+        df = pd.read_csv(file_name)
+        
+        # Check if column exists
+        if column_name not in df.columns:
+            return None
+            
+        # Check if row exists (assuming row_name is in first column)
+        row_idx = df.iloc[:, 0][df.iloc[:, 0] == row_name].index
+        if len(row_idx) == 0:
+            return None
+            
+        # Get the value at the intersection
+        value = df.at[row_idx[0], column_name]
+        
+        # Return None if value is NaN or empty
+        if pd.isna(value) or value == '':
+            return None
+            
+        return value
+        
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return None
+
+def write_position(file_name, column_name, row_name, data):
+    # Read existing CSV file into a pandas DataFrame
+    df = pd.read_csv(file_name)
+    
+    # If row_name doesn't exist, append it
+    if row_name not in df.iloc[:, 0].values:
+        new_row = pd.DataFrame([[row_name] + [-1] * (len(df.columns) - 1)], 
+                              columns=df.columns)
+        
+        df = pd.concat([df, new_row], ignore_index=True)
+    
+    # If column_name doesn't exist, add it
+    if column_name not in df.columns:
+        df[column_name] = -1
+    
+    # Update the specific cell
+    row_idx = df.iloc[:, 0][df.iloc[:, 0] == row_name].index[0]
+    df.at[row_idx, column_name] = data
+    
+    # Write back to CSV
+    df.to_csv(file_name, index=False)
+
 if __name__ == '__main__':
     # create a tensor of shape [4, 48, 32, 32]
     input_tensor = torch.rand(4, 48, 32, 32)

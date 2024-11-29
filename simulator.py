@@ -1,5 +1,5 @@
 from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc
-from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2, Stats
+from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2, Stats, write_position
 import torch
 import numpy as np
 from collections import defaultdict
@@ -12,7 +12,9 @@ import os
 import networkx as nx
 from accelerator import Accelerator
 from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato, run_simulation_MINT, run_simulation_LoAS
+from energy import get_total_energy
 import prosparsity_engine
+
 
 logging.basicConfig(level=logging.INFO)
 
@@ -70,7 +72,7 @@ class Simulator:
     def sim(self):
         if self.accelerator.type == 'PTB':
             stats = run_simulation_PTB(self.network)
-        elif self.accelerator.type == 'eyeriss':
+        elif self.accelerator.type == 'Eyeriss':
             stats = run_simulation_eyeriss(self.network)
         elif self.accelerator.type == 'SATO':
             stats = run_simulation_sato(self.network)
@@ -133,7 +135,6 @@ class Simulator:
                 total_stats.total_cycles += value.total_cycles
                 cycles_layer[type] += value.total_cycles
             last_stats_key, last_stats = key, value
-
         
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1000 * 1000))
@@ -164,9 +165,9 @@ class Simulator:
                 # print("ops sparsity: ", ops_sparsity)
                 # print("rank two sparsity: ", rank_two_sparsity)
 
-        total_stats.cycle_breakdown = cycles_layer
-        for key, value in cycles_layer.items():
-            print(f"{key}: {value / total_stats.total_cycles}")
+        # total_stats.cycle_breakdown = cycles_layer
+        # for key, value in cycles_layer.items():
+        #     print(f"{key}: {value / total_stats.total_cycles}")
         
 
         return total_stats
@@ -774,7 +775,7 @@ if __name__ == '__main__':
     os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 
     parser = argparse.ArgumentParser(description='Simulator')
-    parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
+    parser.add_argument('--type', type=str, default='Eyeriss', help='type of accelerator')
     parser.add_argument('--adder_array_size', type=int, default=128, help='size of adder array')
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
@@ -799,10 +800,11 @@ if __name__ == '__main__':
                               dense=args.dense,
                               )
     
-    ST_model_list = ['spikebert_sst2', 'spikebert_mr', 'spikebert_sst5', 
-                     'spikingbert_sst2', 'spikingbert_qqp', 'spikingbert_mnli',
+    ST_model_list = [
                      'spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 
                      'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100',
+                     'spikebert_sst2', 'spikebert_mr', 'spikebert_sst5', 
+                     'spikingbert_sst2', 'spikingbert_qqp', 'spikingbert_mnli',
                      ]
     
     SCNN_model_list = ['vgg16_cifar10', 'vgg16_cifar100', 
@@ -812,12 +814,13 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = False
+    run_single_model = True
     model_list = ["lenet5_mnist"] # test set
-    if run_ST:
-        model_list.extend(ST_model_list)
+
     if run_SCNN:
         model_list.extend(SCNN_model_list)
+    if run_ST:
+        model_list.extend(ST_model_list)
     if run_single_model:
         model_list = ['spikformer_cifar100',]
 
@@ -830,6 +833,9 @@ if __name__ == '__main__':
         sim = Simulator(accelerator, nn)
         stats = sim.sim()
         stats_list.append(stats)
+
+        energy = get_total_energy(stats, args.type, name)
+        print(f"total energy: {energy}")
 
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
@@ -844,11 +850,6 @@ if __name__ == '__main__':
         filename = '_'.join([str(e) for e in filename_element_list if e is not None])
         file_name = os.path.join(args.output_dir, filename + '.txt')
 
-        # avg_num_all_zero_row = np.mean(num_all_zero_row)
-        # avg_num_EM_row = np.mean(num_EM_row)
-        # avg_num_PM_row = np.mean(num_PM_row)
-        # avg_num_other_row = np.mean(num_other_row)
-        # avg_sum = avg_num_all_zero_row + avg_num_EM_row + avg_num_PM_row + avg_num_other_row
 
         with open(file_name, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
@@ -857,18 +858,11 @@ if __name__ == '__main__':
             f.write(f"total cycles: {stats.total_cycles}\n")
             f.write(f"preprocess stall cycle: {stats.preprocess_stall_cycles}\n")
             f.write(f"original sparsity: {stats.original_sparsity}\n")
-            f.write(f"processed sparsity: {stats.processed_sparsity}\n")
-            f.write(f"product sparsity: {stats.ops_sparsity}\n")
+            f.write(f"product sparsity: {stats.processed_sparsity}\n")
             f.write(f"rank two sparsity: {stats.rank_two_sparsity}\n")
             f.write(f"avg rank one prefix: {stats.avg_rank_one_prefix}\n")
             f.write(f"avg rank two prefix: {stats.avg_rank_two_prefix}\n")
             f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
-            f.write(f"act_reasd: {stats.reads['g_act']}\n")
-            f.write(f"act_write: {stats.writes['g_act']}\n")
-            f.write(f"wgt_read: {stats.reads['g_wgt']}\n")
-            f.write(f"wgt_write: {stats.writes['g_wgt']}\n")
-            f.write(f"psum_read: {stats.reads['g_psum']}\n")
-            f.write(f"psum_write: {stats.writes['g_psum']}\n")
             # f.write(f"num_all_zero_row: {avg_num_all_zero_row}\n")
             # f.write(f"num_EM_row: {avg_num_EM_row}\n")
             # f.write(f"num_PM_row: {avg_num_PM_row}\n")
