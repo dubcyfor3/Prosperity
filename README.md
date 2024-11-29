@@ -19,7 +19,7 @@ git submodule update --init
 
 install prosperity CUDA kernel
 ```bash
-cd kernel
+cd kernels
 python setup.py install
 ```
 
