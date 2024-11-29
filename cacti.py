@@ -134,10 +134,12 @@ if __name__ == "__main__":
 
     print('*'*50)
     tech_node = 0.028
-    print('Eyeriss @ {:1.0f}nm'.format(tech_node*1.e3))
-    block_size = 128
-    cache_size = 32768
-    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': cache_size, 'technology (u)': tech_node}
+    print('SRAM @ {:1.0f}nm'.format(tech_node*1.e3))
+    block_size = 32 # bytes
+    cache_size = 256 * 32 / 8 / 8 * 8# bytes
+    num_bank = 1
+    read_write_ports = 8
+    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': cache_size, 'technology (u)': tech_node, 'UCA bank count': num_bank, 'read-write port': read_write_ports}
     eyeriss_read_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ'])
     eyeriss_write_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ'])
     eyeriss_avg_energy = (eyeriss_read_energy + eyeriss_write_energy) / 2.
