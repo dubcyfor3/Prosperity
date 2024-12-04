@@ -1,4 +1,4 @@
-from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc
+from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc, extract_kernel_size
 from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2, Stats, write_position
 import torch
 import numpy as np
@@ -11,10 +11,9 @@ import argparse
 import os
 import networkx as nx
 from accelerator import Accelerator
-from baselines import run_simulation_eyeriss, run_simulation_PTB, run_simulation_sato, run_simulation_MINT, run_simulation_LoAS
+from baselines import run_simulation_eyeriss, run_simulation_eyeriss_linear, run_simulation_PTB, run_simulation_sato, run_simulation_MINT, run_simulation_LoAS, get_stats_stellar, get_stats_A100
 from energy import get_total_energy
 import prosparsity_engine
-
 
 logging.basicConfig(level=logging.INFO)
 
@@ -62,24 +61,35 @@ def clear_global_stats():
 
 
 class Simulator:
-    def __init__(self, accelerator: Accelerator, network: list):
+    def __init__(self, accelerator: Accelerator, network: list, benchmark_name, use_cuda=False):
         self.accelerator = accelerator
+        self.benchmark_name = benchmark_name
         self.network = network
         self.track_sparsity_increment = True
         self.test_rank_two = False
-        self.device = 'cpu'
+
+        # check whether cuda is available
+        if use_cuda:
+            assert torch.cuda.is_available()
+        self.device = 'cuda' if use_cuda else 'cpu'
 
     def sim(self):
         if self.accelerator.type == 'PTB':
             stats = run_simulation_PTB(self.network)
         elif self.accelerator.type == 'Eyeriss':
             stats = run_simulation_eyeriss(self.network)
+        elif self.accelerator.type == 'Eyeriss_linear':
+            stats = run_simulation_eyeriss_linear(self.network)
         elif self.accelerator.type == 'SATO':
             stats = run_simulation_sato(self.network)
         elif self.accelerator.type == 'MINT':
             stats = run_simulation_MINT(self.network)
         elif self.accelerator.type == 'LoAS':
             stats = run_simulation_LoAS(self.network)
+        elif self.accelerator.type == 'Stellar':
+            stats = get_stats_stellar(self.benchmark_name)
+        elif self.accelerator.type == 'A100':
+            stats = get_stats_A100(self.benchmark_name)
         elif self.accelerator.type == 'Prosperity':
             stats = self.run_simulation()
         else:
@@ -94,9 +104,15 @@ class Simulator:
         spike_stored_in_buffer = False
         for operator in self.network:
             if isinstance(operator, FC):
-                stats[operator.name] = self.run_fc_cuda(operator, spike_stored_in_buffer)
+                if self.device == 'cuda':
+                    stats[operator.name] = self.run_fc_cuda(operator, spike_stored_in_buffer)
+                else:
+                    stats[operator.name] = self.run_fc(operator, spike_stored_in_buffer)
             elif isinstance(operator, Conv2D):
-                stats[operator.name] = self.run_conv2d(operator, spike_stored_in_buffer)
+                if self.device == 'cuda':
+                    stats[operator.name] = self.run_conv2d_cuda(operator, spike_stored_in_buffer)
+                else:
+                    stats[operator.name] = self.run_conv2d(operator, spike_stored_in_buffer)
             elif isinstance(operator, LIFNeuron):
                 stats[operator.name], spike_stored_in_buffer = self.run_LIF(operator)
             elif isinstance(operator, Attention):
@@ -135,6 +151,7 @@ class Simulator:
                 total_stats.total_cycles += value.total_cycles
                 cycles_layer[type] += value.total_cycles
             last_stats_key, last_stats = key, value
+
         
         print("total cycles: ", total_stats.total_cycles)
         print("time", total_stats.total_cycles / (500 * 1000 * 1000))
@@ -196,7 +213,10 @@ class Simulator:
 
         prosparsity_act, prefix_array = prosparsity_engine.find_product_sparsity(input_act)
 
-        stats.reads['dram'] = M * K * operator.activation_tensor.nbits * tile_num_N + K * N * operator.weight_tensor.nbits * tile_num_M
+        kernel_size = extract_kernel_size(operator.name)
+
+        stats.reads['dram'] =  K * N * operator.weight_tensor.nbits * tile_num_M
+        stats.reads['dram'] += M * K * operator.activation_tensor.nbits * tile_num_N // (kernel_size * kernel_size)
         stats.writes['g_act'] = M * K * operator.activation_tensor.nbits * tile_num_N
         stats.writes['g_wgt'] = K * N * operator.weight_tensor.nbits * tile_num_M
 
@@ -255,7 +275,7 @@ class Simulator:
         assert operator.time_steps * operator.sequence_length * operator.input_dim == operator.activation_tensor.sparse_map.numel()
         # reshape activation tensor
         # to device
-        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.to(self.device)
+        operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map
         operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.reshape(operator.time_steps, operator.sequence_length, operator.input_dim)
         # transpose time step and sequence length
         operator.activation_tensor.sparse_map = operator.activation_tensor.sparse_map.permute(1, 0, 2).contiguous()
@@ -302,7 +322,8 @@ class Simulator:
         preprocess_cycles = 0
         orginial_compute_cycles = 0
 
-        is_conv = operator.name.endswith('2fc')
+        is_conv = operator.name.endswith('_fc')
+        kernel_size = extract_kernel_size(operator.name)
 
 
         for m in range(tile_num_M):
@@ -316,19 +337,19 @@ class Simulator:
                     if not spike_stored_in_buffer:
                         if buffer_state_act == "store single tile":
                             if is_conv:
-                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // (kernel_size * kernel_size) # on chip img2col
                             else:
                                 stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
                             stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
                         elif buffer_state_act == "store row":
                             if is_conv:
-                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // (kernel_size * kernel_size)
                             else:
                                 stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
                             stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
                         elif buffer_state_act == "store all" and n == 0:
                             if is_conv:
-                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // 9
+                                stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K // (kernel_size * kernel_size)
                             else:
                                 stats.reads['dram'] += cur_tile_size_M * cur_tile_size_K
                             stats.writes['g_act'] += cur_tile_size_M * cur_tile_size_K
@@ -424,11 +445,14 @@ class Simulator:
         print("preprocess cycles: ", preprocess_cycles)
         print("total cycles: ", stats.total_cycles)
 
-
         return stats
                     
     
     def run_conv2d(self, operator: Conv2D, spike_stored_in_buffer=False):
+        eq_fc = conv2d_2_fc(operator)
+        return self.run_fc(eq_fc, spike_stored_in_buffer)
+    
+    def run_conv2d_cuda(self, operator: Conv2D, spike_stored_in_buffer=False):
         eq_fc = conv2d_2_fc(operator)
         return self.run_fc_cuda(eq_fc, spike_stored_in_buffer)
     
@@ -772,10 +796,10 @@ def find_product_sparsity(act: torch.Tensor):
                     
 if __name__ == '__main__':
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
     parser = argparse.ArgumentParser(description='Simulator')
-    parser.add_argument('--type', type=str, default='Eyeriss', help='type of accelerator')
+    parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
     parser.add_argument('--adder_array_size', type=int, default=128, help='size of adder array')
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
@@ -784,6 +808,7 @@ if __name__ == '__main__':
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
     parser.add_argument('--output_dir', type=str, default='artifact_eval', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
+    parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
 
     args = parser.parse_args()
 
@@ -814,8 +839,8 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = True
-    model_list = ["lenet5_mnist"] # test set
+    run_single_model = False
+    model_list = [] # test set
 
     if run_SCNN:
         model_list.extend(SCNN_model_list)
@@ -830,12 +855,21 @@ if __name__ == '__main__':
         spike_info_path = "data/" + name + ".pkl"
         nn = create_network(model_name, spike_info_path)
 
-        sim = Simulator(accelerator, nn)
+        sim = Simulator(accelerator=accelerator, network=nn, benchmark_name=name, use_cuda=args.use_cuda)
         stats = sim.sim()
         stats_list.append(stats)
 
-        energy = get_total_energy(stats, args.type, name)
+        energy = get_total_energy(stats, args.type.split('_')[0], name)
         print(f"total energy: {energy}")
+
+        write_position(file_name=os.path.join(args.output_dir, "time.csv"), 
+                       column_name=name, 
+                       row_name=args.type,
+                       data=stats.total_cycles / (500 * 1000 * 1000))
+        write_position(file_name=os.path.join(args.output_dir, "energy.csv"), 
+                       column_name=name, 
+                       row_name=args.type,
+                       data=energy)
 
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
@@ -844,9 +878,8 @@ if __name__ == '__main__':
                                  'SCNN' if not run_single_model and run_SCNN else None, 
                                  args.tile_size_M if args.type == 'Prosperity' else None, 
                                  args.tile_size_K if args.type == 'Prosperity' else None, 
-                                 model_list[0] if run_single_model else None, 
-                                 args.tree_type,
-                                 "PS" if not args.without_product_sparsity else "no_PS"]
+                                 model_list[0] if run_single_model else None,
+                                 "cuda" if args.use_cuda else "cpu",]
         filename = '_'.join([str(e) for e in filename_element_list if e is not None])
         file_name = os.path.join(args.output_dir, filename + '.txt')
 
@@ -854,21 +887,12 @@ if __name__ == '__main__':
         with open(file_name, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
             f.write(f"total time: {stats.total_cycles / (500 * 1000 * 1000)}\n")
-            f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
-            f.write(f"total cycles: {stats.total_cycles}\n")
-            f.write(f"preprocess stall cycle: {stats.preprocess_stall_cycles}\n")
-            f.write(f"original sparsity: {stats.original_sparsity}\n")
-            f.write(f"product sparsity: {stats.processed_sparsity}\n")
-            f.write(f"rank two sparsity: {stats.rank_two_sparsity}\n")
-            f.write(f"avg rank one prefix: {stats.avg_rank_one_prefix}\n")
-            f.write(f"avg rank two prefix: {stats.avg_rank_two_prefix}\n")
-            f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
-            # f.write(f"num_all_zero_row: {avg_num_all_zero_row}\n")
-            # f.write(f"num_EM_row: {avg_num_EM_row}\n")
-            # f.write(f"num_PM_row: {avg_num_PM_row}\n")
-            # f.write(f"num_other_row: {avg_num_other_row}\n")
-            # f.write(f"sum: {avg_sum}\n")
-            # for key, value in stats.cycle_breakdown.items():
-            #     f.write(f"{key}: {value / stats.total_cycles}\n")
+            if args.type == 'Prosperity':
+                f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
+                f.write(f"total cycles: {stats.total_cycles}\n")
+                f.write(f"preprocess stall cycle: {stats.preprocess_stall_cycles}\n")
+                f.write(f"original sparsity: {stats.original_sparsity}\n")
+                f.write(f"product sparsity: {stats.processed_sparsity}\n")
+                f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
             f.write("\n")
 
