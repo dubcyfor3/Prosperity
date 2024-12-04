@@ -3,7 +3,9 @@ from collections import OrderedDict
 import pickle
 import torch
 from utils import img2col, get_density
+import re
 from configs import *
+
 
 def compute_num_OPS(nn):
     total_ops = 0
@@ -142,9 +144,16 @@ def conv2d_2_fc(operator: Conv2D) -> FC:
     eq_sequence_length = operator.output_H * operator.output_H
     eq_output_dim = operator.output_channel
     eq_sparse_map = img2col(operator.activation_tensor.sparse_map, operator.kernel_size, operator.stride, operator.padding)
-    eq_fc = FC(operator.name + '_2fc', eq_input_dim, eq_output_dim, eq_sequence_length, operator.batch_size, operator.time_steps)
+    eq_fc = FC(operator.name + '_kernel' + str(operator.kernel_size) + '_fc', eq_input_dim, eq_output_dim, eq_sequence_length, operator.batch_size, operator.time_steps)
     eq_fc.activation_tensor.sparse_map = eq_sparse_map
     return eq_fc
+
+def extract_kernel_size(s):
+    # Match numbers between 'kernel' and '_fc'
+    match = re.search(r'kernel(.*?)_fc', s)
+    if match:
+        return int(match.group(1))
+    return 1 # assume fc layer
 
 def create_network(name, spike_info):
     dataset = spike_info.split('_')[1].split('.')[0]
