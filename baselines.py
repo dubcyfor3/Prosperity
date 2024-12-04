@@ -23,7 +23,7 @@ def run_simulation_sato(network):
     print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
     return total_stats
 
-def run_simulation_eyeriss(network):
+def run_simulation_eyeriss_linear(network):
     stats = OrderedDict()
     for operator in network:
         if isinstance(operator, Conv2D) or isinstance(operator, FC) or isinstance(operator, LIFNeuron):
@@ -32,6 +32,23 @@ def run_simulation_eyeriss(network):
             stats[operator.name] = run_eyeriss_attention(operator)
         elif isinstance(operator, LayerNorm):
             stats[operator.name] = run_eyeriss_layernorm(operator)
+        else:
+            continue
+    
+    total_stats = Stats()
+    for key, value in stats.items():
+        total_stats += value
+        total_stats.total_cycles += value.total_cycles
+
+    print("total cycles: ", total_stats.total_cycles)
+    print("total time: ", total_stats.total_cycles / (500 * 1000 * 1000))
+    return total_stats   
+
+def run_simulation_eyeriss(network):
+    stats = OrderedDict()
+    for operator in network:
+        if isinstance(operator, Conv2D) or isinstance(operator, FC) or isinstance(operator, LIFNeuron):
+            stats[operator.name] = run_eyeriss_conv_fc(operator)
         else:
             continue
     
@@ -186,13 +203,13 @@ def StSAP(act: torch.Tensor):
     return total_length
 
 def run_eyeriss_conv_fc(operator: Union[FC, Conv2D, LIFNeuron]):
-    # a 16 x 8 systolic array, weight stationary 14 * 12
+    # a 14 * 12 systolic array, weight stationary
     stats = Stats()
     if isinstance(operator, FC):
-        stats.compute_cycles += operator.output_dim // 12 * operator.input_dim // 14 * operator.batch_size * operator.time_steps * operator.sequence_length
+        stats.compute_cycles += ceil_a_by_b(operator.output_dim, 12) * (operator.input_dim * operator.batch_size * operator.time_steps * operator.sequence_length // 14)
     elif isinstance(operator, Conv2D):
         eq_fc = conv2d_2_fc(operator)
-        stats.compute_cycles += eq_fc.output_dim // 12 * eq_fc.input_dim // 14 * eq_fc.batch_size * eq_fc.time_steps * eq_fc.sequence_length
+        stats.compute_cycles += ceil_a_by_b(eq_fc.output_dim, 12) * (eq_fc.input_dim * eq_fc.batch_size * eq_fc.time_steps * eq_fc.sequence_length // 14)
     elif isinstance(operator, LIFNeuron):
         stats.compute_cycles += (operator.time_steps // 12) * operator.num_neuron * operator.batch_size // 14
     else:
@@ -321,4 +338,34 @@ def run_PTB_lif(operator: LIFNeuron):
     stats.total_cycles = stats.compute_cycles
     print(operator.name)
     print("total cycles: ", stats.compute_cycles)
+    return stats
+
+def get_stats_stellar(name: str):
+    time_dict = {
+        'vgg16_cifar10': 0.040187906,
+        'vgg16_cifar100': 0.077698212,
+    }
+
+    stats = Stats()
+    stats.total_cycles = time_dict[name]
+    return stats
+
+def get_stats_A100(name: str):
+    time_dict = {
+        'spikformer_cifar10': 0.019,
+        'spikformer_cifar10dvs': 0.0114,
+        'spikformer_cifar100': 0.019,
+        'sdt_cifar10': 0.017,
+        'sdt_cifar10dvs': 0.018,
+        'sdt_cifar100': 0.018,
+        'spikebert_sst2': 0.0372,
+        'spikebert_mr': 0.0397,
+        'spikebert_sst5': 0.033357901,
+        'spikingbert_sst2': 0.096202657,
+        'spikingbert_qqp': 0.092028516,
+        'spikingbert_mnli': 0.094227655,
+
+    }
+    stats = Stats()
+    stats.total_cycles = time_dict[name]
     return stats

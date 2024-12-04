@@ -1,13 +1,5 @@
 from utils import *
 
-on_chip_power_dict = {
-    'Prosperity': 446.5,
-    'Eyeriss': 1128.4,
-    'SATO': 150.88,
-    'PTB': 796.4,
-    'MINT': 317.1,
-}
-
 dram_enenrgy_per_bit = 17.97 # pJ
 
 def get_total_energy(stats: Stats, type: str, model) -> float:
@@ -37,7 +29,7 @@ def get_total_energy(stats: Stats, type: str, model) -> float:
         'MINT': 1.48,
     }
 
-    dram_enenrgy_per_bit = 17.97 # pJ derived from DRAMsim3
+    dram_enenrgy_per_bit = 18.11 # pJ, derived from DRAMsim3
 
     processing_time = stats.total_cycles / (500 * 1000 * 1000) # in seconds
     on_chip_power = on_chip_power_dict[type] # in mW
