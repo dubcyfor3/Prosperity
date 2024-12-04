@@ -1,7 +1,5 @@
 from utils import *
 
-dram_enenrgy_per_bit = 17.97 # pJ
-
 def get_total_energy(stats: Stats, type: str, model) -> float:
     """
     Calculate the total energy consumed by the accelerator.
@@ -15,21 +13,21 @@ def get_total_energy(stats: Stats, type: str, model) -> float:
 
     on_chip_power_dict = {  # derived from papers
         'Prosperity': 446.5,
-        'Eyeriss': 1128.4,
-        'SATO': 150.88,
-        'PTB': 796.4,
-        'MINT': 317.1,
+        'Eyeriss': 1410.5,
+        'SATO': 319.5,
+        'PTB': 982.0,
+        'MINT': 396.3,
     }
 
     mem_access_ratio_dict = {   # derived from papers
         'Prosperity': 1.00,
-        'Eyeriss': 12.3,
-        'SATO': 6.42,
-        'PTB': 5.76,
-        'MINT': 1.48,
+        'Eyeriss': 5.47,
+        'SATO': 4.85,
+        'PTB': 2.53,
+        'MINT': 3.12,
     }
 
-    dram_enenrgy_per_bit = 18.11 # pJ, derived from DRAMsim3
+    dram_enenrgy_per_bit = 12.45 # pJ, derived from DRAMsim3
 
     processing_time = stats.total_cycles / (500 * 1000 * 1000) # in seconds
     on_chip_power = on_chip_power_dict[type] # in mW
