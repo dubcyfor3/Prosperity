@@ -129,7 +129,7 @@ def write_position(file_name, column_name, row_name, data):
     
     # If row_name doesn't exist, append it
     if row_name not in df.iloc[:, 0].values:
-        new_row = pd.DataFrame([[row_name] + [-1] * (len(df.columns) - 1)], 
+        new_row = pd.DataFrame([[row_name] + [-1.0] * (len(df.columns) - 1)], 
                               columns=df.columns)
         
         df = pd.concat([df, new_row], ignore_index=True)
