@@ -1,5 +1,5 @@
 from networks import FC, Conv2D, MaxPool2D, LIFNeuron, Attention, LayerNorm, create_network, conv2d_2_fc, extract_kernel_size
-from utils import ceil_a_by_b, img2col, get_density, pad_to_power_of_2, Stats, write_position
+from utils import ceil_a_by_b, Stats, write_position, write_title
 import torch
 import numpy as np
 from collections import defaultdict
@@ -860,19 +860,23 @@ if __name__ == '__main__':
         stats_list.append(stats)
 
         energy = get_total_energy(stats, args.type.split('_')[0], name)
+        runtime = stats.total_cycles / (500 * 1000 * 1000) if stats.total_cycles is not None else None
         print(f"total energy: {energy}")
+
+        if not os.path.exists(args.output_dir):
+            os.makedirs(args.output_dir)
+
+        if not os.path.exists(os.path.join(args.output_dir, "time.csv")):
+            write_title(file_name=os.path.join(args.output_dir, "time.csv", title=['model_name'] + model_list))
 
         write_position(file_name=os.path.join(args.output_dir, "time.csv"), 
                        column_name=name, 
                        row_name=args.type,
-                       data=stats.total_cycles / (500 * 1000 * 1000))
+                       data=runtime)
         write_position(file_name=os.path.join(args.output_dir, "energy.csv"), 
                        column_name=name, 
                        row_name=args.type,
                        data=energy)
-
-        if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
         filename_element_list = [args.type, 
                                  'ST' if not run_single_model and run_ST else None, 
                                  'SCNN' if not run_single_model and run_SCNN else None, 
@@ -886,13 +890,15 @@ if __name__ == '__main__':
 
         with open(file_name, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
-            f.write(f"total time: {stats.total_cycles / (500 * 1000 * 1000)}\n")
+            f.write(f"end to end time: {runtime}\n")
+            f.write(f"total energy: {energy}\n")
             if args.type == 'Prosperity':
                 f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
                 f.write(f"total cycles: {stats.total_cycles}\n")
                 f.write(f"preprocess stall cycle: {stats.preprocess_stall_cycles}\n")
-                f.write(f"original sparsity: {stats.original_sparsity}\n")
+                f.write(f"bit sparsity: {stats.original_sparsity}\n")
                 f.write(f"product sparsity: {stats.processed_sparsity}\n")
                 f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
+
             f.write("\n")
 

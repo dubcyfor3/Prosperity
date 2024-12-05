@@ -136,7 +136,7 @@ def write_position(file_name, column_name, row_name, data):
     
     # If column_name doesn't exist, add it
     if column_name not in df.columns:
-        df[column_name] = -1
+        df[column_name] = -1.0
     
     # Update the specific cell
     row_idx = df.iloc[:, 0][df.iloc[:, 0] == row_name].index[0]
@@ -145,10 +145,24 @@ def write_position(file_name, column_name, row_name, data):
     # Write back to CSV
     df.to_csv(file_name, index=False)
 
+def write_title(filename, title):
+    # create a new file and write the title in csv format
+    with open(filename, 'w') as f:
+        for i in range(len(title) - 1):
+            f.write(title[i] + ',')
+        f.write(title[-1] + '\n')
+
+    
+
+
+
 if __name__ == '__main__':
     # create a tensor of shape [4, 48, 32, 32]
-    input_tensor = torch.rand(4, 48, 32, 32)
-    kernel_size = 3
-    stride = 1
-    padding = 1
-    column_tensor = img2col(input_tensor, kernel_size, stride, padding)
+    # input_tensor = torch.rand(4, 48, 32, 32)
+    # kernel_size = 3
+    # stride = 1
+    # padding = 1
+    # column_tensor = img2col(input_tensor, kernel_size, stride, padding)
+
+    model_list = ['vgg', 'resnet']
+    write_title('artifact_eval/test.csv', ['model_name'] + model_list)
