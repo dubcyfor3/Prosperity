@@ -128,27 +128,48 @@ class CactiSweep(object):
                 'technology (u)',
                 ]
         return data[cols]
+    
+def get_buffer_area(tech_node, buffer_size, block_size):
+    buffer_sweep_data = CactiSweep()
+    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': buffer_size, 'technology (u)': tech_node}
+    buffer_area = float(buffer_sweep_data.get_data_clean(cfg_dict)['area_mm^2'])
+    return buffer_area
+
+def get_buffer_power_energy(tech_node, buffer_size, block_size):
+    buffer_sweep_data = CactiSweep()
+    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': buffer_size, 'technology (u)': tech_node}
+    buffer_read_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ']) # per buffer access
+    buffer_write_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ']) # per buffer access
+    buffer_leak_power = float(buffer_sweep_data.get_data_clean(cfg_dict)['leak_power_mW'])
+    return buffer_leak_power, buffer_read_energy, buffer_write_energy
 
 if __name__ == "__main__":
-    cache_sweep_data = CactiSweep()
 
-    print('*'*50)
     tech_node = 0.028
-    print('SRAM @ {:1.0f}nm'.format(tech_node*1.e3))
-    block_size = 32 # bytes
-    cache_size = 256 * 32 / 8 / 8 * 8 # bytes
-    num_bank = 1
-    read_write_ports = 1
-    cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': cache_size, 'technology (u)': tech_node, 'UCA bank count': num_bank, 'read-write port': read_write_ports}
-    eyeriss_read_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ'])
-    eyeriss_write_energy = float(cache_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ'])
-    eyeriss_avg_energy = (eyeriss_read_energy + eyeriss_write_energy) / 2.
-    eyeriss_area = float(cache_sweep_data.get_data_clean(cfg_dict)['area_mm^2'])
-    eyeriss_leak_power = float(cache_sweep_data.get_data_clean(cfg_dict)['leak_power_mW'])
-    print('area: {} mm^2'.format(eyeriss_area))
-    print('leakage power: {} mWatt'.format(eyeriss_leak_power))
-    print('read energy per bit: {} nJ'.format(eyeriss_read_energy / (block_size * 8)))
-    print('write energy per bit: {} nJ'.format(eyeriss_write_energy / (block_size * 8)))
-    print('avg energy per bit: {} nJ'.format(eyeriss_avg_energy / (block_size * 8)))
+    act_buffer_config = {   # 8KB
+        'buffer_size': 8192,
+        'block_size': 4,
+    }
+    wgt_buffer_config = {   # 32KB
+        'buffer_size': 32384,
+        'block_size': 128,
+    }
+    out_buffer_0_config = {   # 96KB in total
+        'buffer_size': 32384,
+        'block_size': 128,
+    }
+    out_buffer_1_config = {
+        'buffer_size': 65536,
+        'block_size': 128,
+    }
 
-    cache_sweep_data.update_csv()
+    act_buffer_area = get_buffer_area(tech_node, act_buffer_config['buffer_size'], act_buffer_config['block_size'])
+    wgt_buffer_area = get_buffer_area(tech_node, wgt_buffer_config['buffer_size'], wgt_buffer_config['block_size'])
+    out_buffer_0_area = get_buffer_area(tech_node, out_buffer_0_config['buffer_size'], out_buffer_1_config['block_size'])
+    out_buffer_1_area = get_buffer_area(tech_node, out_buffer_1_config['buffer_size'], out_buffer_1_config['block_size'])
+    print('Act buffer area: {} mm^2'.format(act_buffer_area))
+    print('Wgt buffer area: {} mm^2'.format(wgt_buffer_area))
+    print('Out buffer area: {} mm^2'.format(out_buffer_0_area + out_buffer_1_area))
+
+    total_buffer_area = act_buffer_area + wgt_buffer_area + out_buffer_0_area + out_buffer_1_area
+    print('Prosperity total buffer area: {} mm^2'.format(total_buffer_area))
