@@ -15,7 +15,7 @@ def spikeBERT_config(dataset):
         raise ValueError('Unknown dataset')
 
     spikeBERT_encoder = OrderedDict([
-        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]), # q, k, and v are concatenated into one layer
         ('layernorm_q', [dim, batch_size * 3, sequence_length, time_steps]),
         ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
@@ -48,7 +48,7 @@ def spikingBERT_config(dataset):
     mlp_ratio = 4
 
     spikingBERT_encoder = OrderedDict([
-        ('fc_qkv', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('fc_qkv', [dim, dim * 3, sequence_length, batch_size, time_steps]), # q, k, and v are concatenated into one layer
         ('lif_kv', [dim * sequence_length * 2, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
@@ -104,7 +104,7 @@ def spikformer_config(dataset='cifar10'):
         ('lif_rpe', [image_size[3] * image_size[3] * dim, batch_size, time_steps]),
     ])
     spikformer_encoder = OrderedDict([
-        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+        ('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]), # q, k, and v are concatenated into one layer
         ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
         ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
         ('lif_attn', [dim * sequence_length, batch_size, time_steps]),
@@ -158,7 +158,7 @@ def SDT_config(dataset):
                             ('conv2d_rpe', [image_size[3], dim, dim, 3, 1, 1, batch_size, time_steps]),
                             ('lif_sc', [image_size[3] * image_size[3] * dim, batch_size, time_steps])
     ])
-    SDT_encoder = OrderedDict([('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]),
+    SDT_encoder = OrderedDict([('fc_q', [dim, dim * 3, sequence_length, batch_size, time_steps]), # q, k, and v are concatenated into one layer
                                ('lif_q', [dim * sequence_length * 3, batch_size, time_steps]),
                                ('attention', [dim, sequence_length, num_head, batch_size, time_steps]),
                                ('fc_o', [dim, dim, sequence_length, batch_size, time_steps]),

@@ -12,8 +12,8 @@ class Stats:
         self.mem_namespace = ['dram', 'g_act', 'g_wgt', 'g_psum']
         self.reads = {space: 0 for space in self.mem_namespace}
         self.writes = {space: 0 for space in self.mem_namespace}
-        self.original_sparsity = 0
-        self.processed_sparsity = 0
+        self.bit_density = 0
+        self.product_density = 0
         self.ops_sparsity = 0
         self.rank_two_sparsity = 0
         self.avg_rank_one_prefix = 0
@@ -145,9 +145,9 @@ def write_position(file_name, column_name, row_name, data):
     # Write back to CSV
     df.to_csv(file_name, index=False)
 
-def write_title(filename, title):
+def write_title(file_name, title):
     # create a new file and write the title in csv format
-    with open(filename, 'w') as f:
+    with open(file_name, 'w') as f:
         for i in range(len(title) - 1):
             f.write(title[i] + ',')
         f.write(title[-1] + '\n')

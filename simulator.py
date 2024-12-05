@@ -162,13 +162,13 @@ class Simulator:
         print("mem stall cycles: ", total_stats.mem_stall_cycles)
  
         if self.accelerator.product_sparsity and self.track_sparsity_increment:
-            original_sparsity = sum(ori_nnzs) / sum(total_elements)
-            processed_sparsity = sum(processed_nnzs) / sum(total_elements)
+            bit_density = sum(ori_nnzs) / sum(total_elements)
+            product_density = sum(processed_nnzs) / sum(total_elements)
 
-            total_stats.original_sparsity = original_sparsity
-            total_stats.processed_sparsity = processed_sparsity
-            print("bit density: ", original_sparsity)
-            print("prosparsity density: ", processed_sparsity)
+            total_stats.bit_density = bit_density
+            total_stats.product_density = product_density
+            print("bit density: ", bit_density)
+            print("prosparsity density: ", product_density)
             if self.test_rank_two:
                 # ops_sparsity = sum(ops_nnzs) / sum(total_elements)
                 # rank_two_sparsity = sum(rank_two_nnzs) / sum(total_elements)
@@ -806,7 +806,7 @@ if __name__ == '__main__':
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--without_product_sparsity', action='store_true', default=False, help='without product sparsity')
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
-    parser.add_argument('--output_dir', type=str, default='artifact_eval', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='ae_test', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
 
@@ -847,7 +847,17 @@ if __name__ == '__main__':
     if run_ST:
         model_list.extend(ST_model_list)
     if run_single_model:
-        model_list = ['spikformer_cifar100',]
+        model_list = ['spikebert_mr',]
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+
+    if not os.path.exists(os.path.join(args.output_dir, "time.csv")):
+        write_title(file_name=os.path.join(args.output_dir, "time.csv"), title=['model_name'] + model_list)
+    if not os.path.exists(os.path.join(args.output_dir, "energy.csv")):
+        write_title(file_name=os.path.join(args.output_dir, "energy.csv"), title=['model_name'] + model_list)
+    if not os.path.exists(os.path.join(args.output_dir, "density.csv")):
+        write_title(file_name=os.path.join(args.output_dir, "density.csv"), title=['model_name'] + model_list)
 
     for name in model_list:
         clear_global_stats()
@@ -863,11 +873,6 @@ if __name__ == '__main__':
         runtime = stats.total_cycles / (500 * 1000 * 1000) if stats.total_cycles is not None else None
         print(f"total energy: {energy}")
 
-        if not os.path.exists(args.output_dir):
-            os.makedirs(args.output_dir)
-
-        if not os.path.exists(os.path.join(args.output_dir, "time.csv")):
-            write_title(file_name=os.path.join(args.output_dir, "time.csv", title=['model_name'] + model_list))
 
         write_position(file_name=os.path.join(args.output_dir, "time.csv"), 
                        column_name=name, 
@@ -896,9 +901,18 @@ if __name__ == '__main__':
                 f.write(f"mem access: {stats.reads['dram'] + stats.writes['dram']}\n")
                 f.write(f"total cycles: {stats.total_cycles}\n")
                 f.write(f"preprocess stall cycle: {stats.preprocess_stall_cycles}\n")
-                f.write(f"bit sparsity: {stats.original_sparsity}\n")
-                f.write(f"product sparsity: {stats.processed_sparsity}\n")
+                f.write(f"bit density: {stats.bit_density}\n")
+                f.write(f"product density: {stats.product_density}\n")
                 f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
+
+                write_position(file_name=os.path.join(args.output_dir, "density.csv"), 
+                               column_name=name, 
+                               row_name="bit density",
+                               data=stats.bit_density)
+                write_position(file_name=os.path.join(args.output_dir, "density.csv"),
+                                 column_name=name, 
+                                 row_name="product density",
+                                 data=stats.product_density)
 
             f.write("\n")
 
