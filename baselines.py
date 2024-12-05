@@ -347,7 +347,10 @@ def get_stats_stellar(name: str):
     }
 
     stats = Stats()
-    stats.total_cycles = time_dict[name]
+    if name not in time_dict:
+        stats.total_cycles = None
+    else:
+        stats.total_cycles = time_dict[name] * 500 * 1000 * 1000
     return stats
 
 def get_stats_A100(name: str):
@@ -367,5 +370,8 @@ def get_stats_A100(name: str):
 
     }
     stats = Stats()
-    stats.total_cycles = time_dict[name]
+    if name not in time_dict:
+        stats.total_cycles = None
+    else:
+        stats.total_cycles = time_dict[name] * 500 * 1000 * 1000
     return stats
