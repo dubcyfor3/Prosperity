@@ -6,7 +6,6 @@ from collections import defaultdict
 from collections import OrderedDict
 import logging
 from typing import Union
-from cacti import CactiSweep
 import argparse
 import os
 import networkx as nx
