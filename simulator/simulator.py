@@ -805,7 +805,7 @@ if __name__ == '__main__':
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--without_product_sparsity', action='store_true', default=False, help='without product sparsity')
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
-    parser.add_argument('--output_dir', type=str, default='ae_test', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='../ae_test', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
 
@@ -838,7 +838,7 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = False
+    run_single_model = True
     model_list = [] # test set
 
     if run_SCNN:
@@ -846,7 +846,7 @@ if __name__ == '__main__':
     if run_ST:
         model_list.extend(ST_model_list)
     if run_single_model:
-        model_list = ['spikebert_mr',]
+        model_list = ['spikformer_cifar100',]
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -861,7 +861,7 @@ if __name__ == '__main__':
     for name in model_list:
         clear_global_stats()
         model_name = name.split('_')[0]
-        spike_info_path = "data/" + name + ".pkl"
+        spike_info_path = "../data/" + name + ".pkl"
         nn = create_network(model_name, spike_info_path)
 
         sim = Simulator(accelerator=accelerator, network=nn, benchmark_name=name, use_cuda=args.use_cuda)

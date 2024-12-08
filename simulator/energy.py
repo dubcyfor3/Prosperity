@@ -42,7 +42,7 @@ def get_total_energy(stats: Stats, type: str, model) -> float:
             on_chip_power = on_chip_power_dict[type] # in mW
             on_chip_energy = on_chip_power * processing_time # in mJ
         
-            dram_access = read_position(file_name='artifact_eval/mem.csv', column_name=model, row_name="mem_access")
+            dram_access = read_position(file_name='../artifact_eval/mem.csv', column_name=model, row_name="mem_access")
             dram_access *= mem_access_ratio_dict[type]
             dram_energy = dram_enenrgy_per_bit * dram_access * 1e-9 # in mJ
             total_energy = on_chip_energy + dram_energy
