@@ -210,7 +210,9 @@ class Simulator:
         tile_num_K = ceil_a_by_b(K, tile_size_K)
         tile_num_N = ceil_a_by_b(N, tile_size_N)
 
-        prosparsity_act, prefix_array = prosparsity_engine.find_product_sparsity(input_act)
+        if tile_size_M * tile_size_K > 32768:
+            raise Exception("tile size is too large for shared memory")
+        prosparsity_act, prefix_array = prosparsity_engine.find_product_sparsity(input_act, tile_size_M, tile_size_K)
 
         kernel_size = extract_kernel_size(operator.name)
 
@@ -803,11 +805,12 @@ if __name__ == '__main__':
     parser.add_argument('--LIF_array_size', type=int, default=32, help='size of LIF array')
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
-    parser.add_argument('--without_product_sparsity', action='store_true', default=False, help='without product sparsity')
+    parser.add_argument('--bit_sparsity', action='store_true', default=False, help='bit sparsity mode, no product sparsity')
     parser.add_argument('--tree_type', type=int, default=2, help='tree type')
-    parser.add_argument('--output_dir', type=str, default='../ae_test', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='../arti', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
+    parser.add_argument('--dse_mode', action='store_true', default=False, help='design space exploration mode')
 
     args = parser.parse_args()
 
@@ -819,7 +822,7 @@ if __name__ == '__main__':
                               LIF_array_size=args.LIF_array_size, 
                               tile_size_M=args.tile_size_M, 
                               tile_size_K=args.tile_size_K,
-                              product_sparsity=not args.without_product_sparsity,
+                              product_sparsity=not args.bit_sparsity,
                               tree_manage_type=args.tree_type,
                               dense=args.dense,
                               )
@@ -838,7 +841,7 @@ if __name__ == '__main__':
 
     run_ST = True
     run_SCNN = True
-    run_single_model = True
+    run_single_model = False
     model_list = [] # test set
 
     if run_SCNN:
@@ -851,12 +854,34 @@ if __name__ == '__main__':
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    if not os.path.exists(os.path.join(args.output_dir, "time.csv")):
-        write_title(file_name=os.path.join(args.output_dir, "time.csv"), title=['model_name'] + model_list)
-    if not os.path.exists(os.path.join(args.output_dir, "energy.csv")):
-        write_title(file_name=os.path.join(args.output_dir, "energy.csv"), title=['model_name'] + model_list)
-    if not os.path.exists(os.path.join(args.output_dir, "density.csv")):
-        write_title(file_name=os.path.join(args.output_dir, "density.csv"), title=['model_name'] + model_list)
+    dse_mode = args.dse_mode
+
+    if not dse_mode:
+        time_file = os.path.join(args.output_dir, "time.csv")
+        energy_file = os.path.join(args.output_dir, "energy.csv")
+        density_file = os.path.join(args.output_dir, "density.csv")
+
+        if not os.path.exists(time_file):
+            write_title(file_name=time_file, title=['model_name'] + model_list)
+        if not os.path.exists(energy_file):
+            write_title(file_name=energy_file, title=['model_name'] + model_list)
+        if not os.path.exists(density_file):
+            write_title(file_name=density_file, title=['model_name'] + model_list)
+
+    elif dse_mode:
+        if args.bit_sparsity:
+            time_file = os.path.join(args.output_dir, "time_bit_sparsity.csv".format(args.tile_size_M, args.tile_size_K))
+            density_file = os.path.join(args.output_dir, "density_bit_sparsity.csv".format(args.tile_size_M, args.tile_size_K))
+            energy_file = None
+        else:
+            time_file = os.path.join(args.output_dir, "time_M{}_K{}.csv".format(args.tile_size_M, args.tile_size_K))
+            density_file = os.path.join(args.output_dir, "density_M{}_K{}.csv".format(args.tile_size_M, args.tile_size_K))
+            energy_file = None
+
+        if not os.path.exists(time_file):
+            write_title(file_name=time_file, title=['model_name'] + model_list)
+        if not os.path.exists(density_file):
+            write_title(file_name=density_file, title=['model_name'] + model_list)
 
     for name in model_list:
         clear_global_stats()
@@ -868,19 +893,23 @@ if __name__ == '__main__':
         stats = sim.sim()
         stats_list.append(stats)
 
-        energy = get_total_energy(stats, args.type.split('_')[0], name)
+        if not dse_mode:
+            energy = get_total_energy(stats, args.type.split('_')[0], name)
+            print(f"total energy: {energy}")
+        else:
+            energy = None
         runtime = stats.total_cycles / (500 * 1000 * 1000) if stats.total_cycles is not None else None
-        print(f"total energy: {energy}")
 
 
-        write_position(file_name=os.path.join(args.output_dir, "time.csv"), 
+        write_position(file_name=time_file, 
                        column_name=name, 
                        row_name=args.type,
                        data=runtime)
-        write_position(file_name=os.path.join(args.output_dir, "energy.csv"), 
-                       column_name=name, 
-                       row_name=args.type,
-                       data=energy)
+        if energy_file is not None:
+            write_position(file_name=energy_file, 
+                        column_name=name, 
+                        row_name=args.type,
+                        data=energy)
         filename_element_list = [args.type, 
                                  'ST' if not run_single_model and run_ST else None, 
                                  'SCNN' if not run_single_model and run_SCNN else None, 
@@ -888,11 +917,11 @@ if __name__ == '__main__':
                                  args.tile_size_K if args.type == 'Prosperity' else None, 
                                  model_list[0] if run_single_model else None,
                                  "cuda" if args.use_cuda else "cpu",]
-        filename = '_'.join([str(e) for e in filename_element_list if e is not None])
-        file_name = os.path.join(args.output_dir, filename + '.txt')
+        stats_filename = '_'.join([str(e) for e in filename_element_list if e is not None])
+        stats_file_path = os.path.join(args.output_dir, stats_filename + '.txt')
 
 
-        with open(file_name, 'a') as f:  # Open the file in append mode
+        with open(stats_file_path, 'a') as f:  # Open the file in append mode
             f.write(f"model: {name}\n")
             f.write(f"end to end time: {runtime}\n")
             f.write(f"total energy: {energy}\n")
@@ -904,11 +933,11 @@ if __name__ == '__main__':
                 f.write(f"product density: {stats.product_density}\n")
                 f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
 
-                write_position(file_name=os.path.join(args.output_dir, "density.csv"), 
+                write_position(file_name=density_file, 
                                column_name=name, 
                                row_name="bit density",
                                data=stats.bit_density)
-                write_position(file_name=os.path.join(args.output_dir, "density.csv"),
+                write_position(file_name=density_file,
                                  column_name=name, 
                                  row_name="product density",
                                  data=stats.product_density)
