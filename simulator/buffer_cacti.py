@@ -5,7 +5,7 @@ import re
 import json
 
 class CactiSweep(object):
-    def __init__(self, bin_file='./cacti/cacti', csv_file='cacti_stats.csv', default_json='./sram_config.json'):
+    def __init__(self, bin_file='../cacti/cacti', csv_file='cacti_stats.csv', default_json='./sram_config.json'):
         if not os.path.isfile(bin_file):
             print("Can't find binary file {}. Please clone and compile cacti first".format(bin_file))
             self.bin_file = None
@@ -99,7 +99,7 @@ class CactiSweep(object):
     def get_data(self, index_dict):
         data = self.locate(index_dict)
         if len(data) == 0:
-            print('No entry found in {}, running cacti'.format(self.csv_file))
+            print('running cacti')
             row_dict = index_dict.copy()
             row_dict.update(self._run_cacti(index_dict))
             row_dict["area_mm^2"] = float(row_dict["height_mm"]) * float(row_dict["width_mm"])
@@ -132,15 +132,15 @@ class CactiSweep(object):
 def get_buffer_area(tech_node, buffer_size, block_size):
     buffer_sweep_data = CactiSweep()
     cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': buffer_size, 'technology (u)': tech_node}
-    buffer_area = float(buffer_sweep_data.get_data_clean(cfg_dict)['area_mm^2'])
+    buffer_area = buffer_sweep_data.get_data_clean(cfg_dict)['area_mm^2'].item()
     return buffer_area
 
 def get_buffer_power_energy(tech_node, buffer_size, block_size):
     buffer_sweep_data = CactiSweep()
     cfg_dict = {'block size (bytes)': block_size, 'size (bytes)': buffer_size, 'technology (u)': tech_node}
-    buffer_read_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ']) # per buffer access
-    buffer_write_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ']) # per buffer access
-    buffer_leak_power = float(buffer_sweep_data.get_data_clean(cfg_dict)['leak_power_mW'])
+    buffer_read_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['read_energy_nJ'].item()) # per buffer access
+    buffer_write_energy = float(buffer_sweep_data.get_data_clean(cfg_dict)['write_energy_nJ'].item()) # per buffer access
+    buffer_leak_power = float(buffer_sweep_data.get_data_clean(cfg_dict)['leak_power_mW'].item())
     return buffer_leak_power, buffer_read_energy, buffer_write_energy
 
 if __name__ == "__main__":
