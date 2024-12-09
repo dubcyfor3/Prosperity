@@ -18,7 +18,6 @@ __global__ void prosparsity_kernel(
     int tile_size_k
 )
 {
-
     int tile_m = blockIdx.x;
     int tile_k = blockIdx.y;
 
@@ -28,62 +27,94 @@ __global__ void prosparsity_kernel(
     int end_m = min(start_m + tile_size_m, M);
     int end_k = min(start_k + tile_size_k, K);
 
-    int m = start_m + threadIdx.x;
+    // Note: blockDim.x <= 1024, but tile_size_m can be larger (e.g., 2048)
+    // We'll process the rows in chunks of blockDim.x rows.
+    int threads_for_rows = blockDim.x;
 
     extern __shared__ char shared_mem[];
-
     int* nnz_array = (int*)shared_mem;
     uint8_t* act_tile = (uint8_t*)(shared_mem + tile_size_m * sizeof(int));
 
-    nnz_array[threadIdx.x] = 0;
-    // copy the input act to shared memory
-    if (m < end_m)
-    {
-        for (int k = start_k; k < end_k; k++)
-        {
-            act_tile[threadIdx.x * tile_size_k + k - start_k] = input_act[m * K + k];
-            nnz_array[threadIdx.x] += input_act[m * K + k];
+    // Initialize nnz_array
+    for (int row_offset = 0; row_offset < tile_size_m; row_offset += threads_for_rows) {
+        int local_row = row_offset + threadIdx.x;
+        if (local_row < tile_size_m) {
+            nnz_array[local_row] = 0;
         }
+    }
+    __syncthreads();
+
+    // Load data into shared memory
+    // Each thread processes multiple rows in chunks.
+    for (int row_offset = 0; row_offset < tile_size_m; row_offset += threads_for_rows) {
+        int local_row = row_offset + threadIdx.x;
+        int m = start_m + local_row;
+        if (local_row < tile_size_m && m < end_m) {
+            int nnz = 0;
+            for (int k = start_k; k < end_k; k++) {
+                uint8_t val = input_act[m * K + k];
+                act_tile[local_row * tile_size_k + (k - start_k)] = val;
+                nnz += val;
+            }
+            nnz_array[local_row] = nnz;
+        }
+        __syncthreads(); // Ensure all threads finish loading before next iteration
     }
 
     __syncthreads();
-    bool is_subset;
-    int max_subset = 0;
-    int prefix = -1;
 
-    if (m < end_m)
-    {
-        for (int i = start_m; i < end_m; i++)
-        {
-            is_subset = !(nnz_array[threadIdx.x] == nnz_array[i - start_m] && threadIdx.x <= i - start_m);
-            for (int k = start_k; k < end_k; k++)
-            {
-                // is_subset &= input_act[m * K + k] >= input_act[i * K + k];
-                is_subset &= act_tile[threadIdx.x * tile_size_k + k - start_k] >= act_tile[(i - start_m) * tile_size_k + k - start_k];
-            }
-            if (is_subset && nnz_array[i - start_m] > max_subset)
-            {
-                max_subset = nnz_array[i - start_m];
-                prefix = i - start_m;
-            }
-        }
-        
-        if (nnz_array[threadIdx.x] < 2)
-        {
-            prefix = -1;
-        }
+    // Now we have all rows in shared memory.
+    // Compute subsets and prefixes for each row
+    for (int row_offset = 0; row_offset < tile_size_m; row_offset += threads_for_rows) {
+        int local_row = row_offset + threadIdx.x;
+        int m = start_m + local_row;
 
-        prefix_array[tile_m * gridDim.y * tile_size_m + tile_k * tile_size_m + m - start_m] = prefix;
-        if (prefix != -1)
-        {
-            for (int k = start_k; k < end_k; k++)
-            {
-                // prosparsity_act[m * K + k] = input_act[m * K + k] - input_act[(prefix + start_m) * K + k];
-                prosparsity_act[m * K + k] = act_tile[threadIdx.x * tile_size_k + k - start_k] - act_tile[prefix * tile_size_k + k - start_k];
+        if (local_row < tile_size_m && m < end_m) {
+            bool is_subset;
+            int max_subset = 0;
+            int prefix = -1;
+
+            int current_nnz = nnz_array[local_row];
+            uint8_t* current_row_ptr = &act_tile[local_row * tile_size_k];
+
+            for (int i = 0; i < tile_size_m; i++) {
+                if (i == local_row) continue;
+                // Check if current row is a subset of row i
+                // Original logic:
+                // is_subset = !(nnz_array[threadIdx.x] == nnz_array[i - start_m] && threadIdx.x <= i - start_m);
+                // Adjusted for our indexing:
+                // The condition basically says we start is_subset as the negation:
+                is_subset = !(current_nnz == nnz_array[i] && local_row <= i);
+
+                uint8_t* candidate_row_ptr = &act_tile[i * tile_size_k];
+                for (int k = 0; k < (end_k - start_k) && is_subset; k++) {
+                    is_subset = (current_row_ptr[k] >= candidate_row_ptr[k]);
+                }
+
+                if (is_subset && nnz_array[i] > max_subset) {
+                    max_subset = nnz_array[i];
+                    prefix = i;
+                }
+            }
+
+            if (current_nnz < 2) {
+                prefix = -1;
+            }
+
+            prefix_array[tile_m * gridDim.y * tile_size_m + tile_k * tile_size_m + local_row] = prefix;
+
+            // Compute prosparsity_act
+            if (prefix != -1) {
+                uint8_t* prefix_row_ptr = &act_tile[prefix * tile_size_k];
+                for (int k = start_k; k < end_k; k++) {
+                    prosparsity_act[m * K + k] = current_row_ptr[k - start_k] - prefix_row_ptr[k - start_k];
+                }
             }
         }
+        __syncthreads();
     }
 }
+
 
 std::tuple<torch::Tensor, torch::Tensor> find_product_sparsity(
     torch::Tensor _input_act,
@@ -96,55 +127,35 @@ std::tuple<torch::Tensor, torch::Tensor> find_product_sparsity(
     int num_tiles_m = (M + tile_size_m - 1) / tile_size_m;
     int num_tiles_k = (K + tile_size_k - 1) / tile_size_k;
 
-    // ensure that the tile sizes are within the limits
-    if (tile_size_m > MAX_TILE_SIZE_M || tile_size_k > MAX_TILE_SIZE_K)
-    {
-        printf("Error: tile size exceeds the maximum limit\n");
-        // move to CPU
-        _input_act = _input_act.to(torch::kCPU);
-        return std::make_tuple(_input_act, _input_act);
-    }
-
-    // convert input act from bool to uint8_t
-    _input_act = _input_act.to(torch::kByte);
-
-    // move to device
-    _input_act = _input_act.to(torch::kCUDA);
-
-
+    _input_act = _input_act.to(torch::kByte).to(torch::kCUDA);
 
     auto input_act = reinterpret_cast<uint8_t*>(_input_act.data_ptr<uint8_t>());
-
-    // clone the input_act tensor to prosparsity_act
     at::Tensor _prosparsity_act = _input_act.clone();
-
-
-    at::Tensor _prefix_array = torch::ones({num_tiles_m, num_tiles_k, tile_size_m}, torch::kInt32).to(torch::kCUDA);
-
-    _prefix_array = _prefix_array * -1;
-
+    at::Tensor _prefix_array = torch::full({num_tiles_m, num_tiles_k, tile_size_m}, -1, torch::kInt32).to(torch::kCUDA);
 
     auto prosparsity_act = reinterpret_cast<uint8_t*>(_prosparsity_act.data_ptr<uint8_t>());
     auto prefix_array = reinterpret_cast<int*>(_prefix_array.data_ptr<int>());
 
     dim3 num_blocks(num_tiles_m, num_tiles_k);
-    dim3 threads_per_block(tile_size_m);
-    // int shared_memory_size = tile_size_m * sizeof(int) + tile_size_m * tile_size_k * sizeof(uint8_t);
-    int shared_memory_size = 1024 * sizeof(int) + 1024 * 32 * sizeof(uint8_t);
 
-    if (shared_memory_size > 49152)
-    {
+    // We limit threads per block to 1024 (or less)
+    int threads_per_block = 1024; 
+    if (tile_size_m < threads_per_block) {
+        threads_per_block = tile_size_m; // if tile_size_m <= 1024
+    }
+
+    // Compute shared memory size dynamically based on tile_size_m and tile_size_k
+    size_t shared_memory_size = tile_size_m * sizeof(int) + 
+                                (size_t)tile_size_m * tile_size_k * sizeof(uint8_t);
+
+    if (shared_memory_size > 49152) {
         printf("Error: too much shared memory required\n");
-        // move to CPU
         _prosparsity_act = _prosparsity_act.to(torch::kCPU);
         _prefix_array = _prefix_array.to(torch::kCPU);
         return std::make_tuple(_prosparsity_act, _prefix_array);
     }
 
-
-
     prosparsity_kernel<<<num_blocks, threads_per_block, shared_memory_size>>>(
-    // prosparsity_kernel<<<num_blocks, threads_per_block>>>(
         input_act,
         prosparsity_act,
         prefix_array,
@@ -154,12 +165,14 @@ std::tuple<torch::Tensor, torch::Tensor> find_product_sparsity(
         tile_size_k
     );
 
-    // input_act = input_act.to(torch::kCPU);
+    cudaDeviceSynchronize();
+
     _prosparsity_act = _prosparsity_act.to(torch::kCPU);
     _prefix_array = _prefix_array.to(torch::kCPU);
 
     return std::make_tuple(_prosparsity_act, _prefix_array);
 }
+
 
 void find_product_sparsity_cpp(
     uint8_t* input_act,
