@@ -52,6 +52,7 @@ cd ..
 ### Run Prosperity and baselines simulation (Figure 8) (15 minutes)
 
 ```bash
+cd simulator
 ./run_simulator_all.sh
 ```
 
