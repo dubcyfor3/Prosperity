@@ -1,0 +1,2 @@
+model_name,vgg16_cifar10,vgg16_cifar100,resnet18_cifar10,resnet18_cifar100,spikformer_cifar10,spikformer_cifar10dvs,spikformer_cifar100,sdt_cifar10,sdt_cifar10dvs,sdt_cifar100,spikebert_sst2,spikebert_mr,spikebert_sst5,spikingbert_sst2,spikingbert_qqp,spikingbert_mnli
+mem_access,2306605056,2306605056,730988544,730988544,140574720,217841664,140574720,241565696,549388288,241565696,2505572352,4982833152,2505572352,2585788416,2585788416,2585788416
