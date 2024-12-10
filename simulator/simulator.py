@@ -806,7 +806,7 @@ if __name__ == '__main__':
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--bit_sparsity', action='store_true', default=False, help='bit sparsity mode, no product sparsity')
-    parser.add_argument('--output_dir', type=str, default='../arti', help='output directory')
+    parser.add_argument('--output_dir', type=str, default='../output', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
     parser.add_argument('--dse_mode', action='store_true', default=False, help='design space exploration mode')

@@ -45,7 +45,7 @@ def add_geometric_mean(df_dse):
 
 if __name__ == '__main__':
     
-    folder_name = '../des_test'
+    folder_name = '../dse'
     tile_size_M_list = [32, 64, 128, 256, 512, 1024, 2048]
     tile_size_K = 16
 
