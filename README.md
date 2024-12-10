@@ -60,7 +60,7 @@ It is expected to take 15 minutes to finish with CUDA.
 It will output the end to end runtime and energy consumption of each accelerator and on each dataset.
 The results will be stored in `output` folder, named as `time.csv` and `energy.csv`.
 We also provide a reference file in `reference` folder. `time_reference.xlsx` and `energy_reference.xlsx` contain reference results and figure 8 in the paper.
-For Prosperity, it will also output the bit density and product density statistics in Figure 11 in the paper.
+The energy evaluation depend on the file `mem_reference.csv` in `reference` folder. This stats is derived from the Prosperity simulation output in file `Prosperity_ST_SCNN_256_16_cuda.txt` in `output` folder.
 
 ### Design space exploration (Figure 7, without power and area stats) (1 hour 30 minutes)
 
