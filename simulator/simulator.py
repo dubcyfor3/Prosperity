@@ -806,11 +806,11 @@ if __name__ == '__main__':
     parser.add_argument('--tile_size_M', type=int, default=256, help='tile size M')
     parser.add_argument('--tile_size_K', type=int, default=16, help='tile size K')
     parser.add_argument('--bit_sparsity', action='store_true', default=False, help='bit sparsity mode, no product sparsity')
-    parser.add_argument('--tree_type', type=int, default=2, help='tree type')
     parser.add_argument('--output_dir', type=str, default='../arti', help='output directory')
     parser.add_argument('--dense', action='store_true', default=False, help='dense')
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
     parser.add_argument('--dse_mode', action='store_true', default=False, help='design space exploration mode')
+    parser.add_argument('--sparse_analysis_mode', action='store_true', default=False, help='analyze the ProSparity and BitSparsity in extra models')
 
     args = parser.parse_args()
 
@@ -823,7 +823,7 @@ if __name__ == '__main__':
                               tile_size_M=args.tile_size_M, 
                               tile_size_K=args.tile_size_K,
                               product_sparsity=not args.bit_sparsity,
-                              tree_manage_type=args.tree_type,
+                              tree_manage_type=1,
                               dense=args.dense,
                               )
     
@@ -851,12 +851,23 @@ if __name__ == '__main__':
     if run_single_model:
         model_list = ['spikformer_cifar100',]
 
+    if args.sparse_analysis_mode:
+        model_list = ['vgg16_cifar10', 'vgg16_cifar100', 
+                      'vgg9_cifar10', 'vgg9_cifar10dvs',
+                       'resnet18_cifar10', 'resnet18_cifar100',
+                       'lenet5_mnist',
+                       'spikformer_cifar10', 'spikformer_cifar10dvs', 'spikformer_cifar100', 
+                     'sdt_cifar10', 'sdt_cifar10dvs', 'sdt_cifar100',
+                     'spikebert_sst2', 'spikebert_mr', 'spikebert_sst5', 
+                     'spikingbert_sst2', 'spikingbert_qqp', 'spikingbert_mnli',
+                        ]
+
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
     dse_mode = args.dse_mode
 
-    if not dse_mode:
+    if not dse_mode and not args.sparse_analysis_mode:
         time_file = os.path.join(args.output_dir, "time.csv")
         energy_file = os.path.join(args.output_dir, "energy.csv")
         density_file = os.path.join(args.output_dir, "density.csv")
@@ -882,6 +893,14 @@ if __name__ == '__main__':
             write_title(file_name=time_file, title=['model_name'] + model_list)
         if not os.path.exists(density_file):
             write_title(file_name=density_file, title=['model_name'] + model_list)
+    
+    elif args.sparse_analysis_mode:
+        density_file = os.path.join(args.output_dir, "density_analysis.csv")
+        time_file = None
+        energy_file = None
+
+        if not os.path.exists(density_file):
+            write_title(file_name=density_file, title=['model_name'] + model_list)
 
     for name in model_list:
         clear_global_stats()
@@ -893,18 +912,18 @@ if __name__ == '__main__':
         stats = sim.sim()
         stats_list.append(stats)
 
-        if not dse_mode:
+        if not dse_mode and not args.sparse_analysis_mode:
             energy = get_total_energy(stats, args.type.split('_')[0], name)
             print(f"total energy: {energy}")
         else:
             energy = None
         runtime = stats.total_cycles / (500 * 1000 * 1000) if stats.total_cycles is not None else None
 
-
-        write_position(file_name=time_file, 
-                       column_name=name, 
-                       row_name=args.type,
-                       data=runtime)
+        if time_file is not None:
+            write_position(file_name=time_file, 
+                        column_name=name, 
+                        row_name=args.type,
+                        data=runtime)
         if energy_file is not None:
             write_position(file_name=energy_file, 
                         column_name=name, 
@@ -933,14 +952,15 @@ if __name__ == '__main__':
                 f.write(f"product density: {stats.product_density}\n")
                 f.write(f"mem stall cycle: {stats.mem_stall_cycles}\n")
 
-                write_position(file_name=density_file, 
-                               column_name=name, 
-                               row_name="bit density",
-                               data=stats.bit_density)
-                write_position(file_name=density_file,
-                                 column_name=name, 
-                                 row_name="product density",
-                                 data=stats.product_density)
+                if density_file is not None:
+                    write_position(file_name=density_file, 
+                                   column_name=name, 
+                                   row_name="bit density",
+                                   data=stats.bit_density)
+                    write_position(file_name=density_file,
+                                     column_name=name, 
+                                     row_name="product density",
+                                     data=stats.product_density)
 
             f.write("\n")
 

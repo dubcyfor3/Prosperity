@@ -18,6 +18,6 @@ class Accelerator:
 
         self.product_sparsity = product_sparsity
         self.dense = dense
-        self.tree_manage_type = tree_manage_type # 0: store tree in adj 1: search tree through prefix 2: sorting based tree
+        self.tree_manage_type = tree_manage_type # 1: search tree through prefix 2: sorting based tree
 
 

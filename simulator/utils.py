@@ -127,12 +127,16 @@ def write_position(file_name, column_name, row_name, data):
     # Read existing CSV file into a pandas DataFrame
     df = pd.read_csv(file_name)
     
-    # If row_name doesn't exist, append it
-    if row_name not in df.iloc[:, 0].values:
-        new_row = pd.DataFrame([[row_name] + [-1.0] * (len(df.columns) - 1)], 
-                              columns=df.columns)
-        
-        df = pd.concat([df, new_row], ignore_index=True)
+    # Handle the case where the DataFrame is empty (no rows, only headers)
+    if df.empty:
+        # Create a new row initialized with the row_name and -1.0 for other columns
+        df.loc[0] = [row_name] + [-1.0] * (len(df.columns) - 1)
+    else:
+        # If the row_name doesn't exist, append it
+        if row_name not in df.iloc[:, 0].values:
+            new_row = pd.DataFrame([[row_name] + [-1.0] * (len(df.columns) - 1)], 
+                                   columns=df.columns)
+            df = pd.concat([df, new_row], ignore_index=True)
     
     # If column_name doesn't exist, add it
     if column_name not in df.columns:
