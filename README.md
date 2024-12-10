@@ -1,4 +1,4 @@
-# Prosperity: Accelerating Spiking Neural Networks via Product Sparity
+# Prosperity: Accelerating Spiking Neural Networks via Product Sparsity
 
 This repository is the official implementation of HPCA 2025 paper, Prosperity: Accelerating Spiking Neural Networks via Product Sparsity. It contains the cycle-accurate simulator for Prosperity architecture and implementation of several baseline accelerators.
 
