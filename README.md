@@ -1,6 +1,6 @@
 # Prosperity: Accelerating Spiking Neural Networks via Product Sparity
 
-This repository is the official implementation of HPCA 2025 paper, Prosperity: Accelerating Spiking Neural Networks via Product Sparity. It contains the cycle-accurate simulator for Prosperity architecture and implementation of several baseline accelerators.
+This repository is the official implementation of HPCA 2025 paper, Prosperity: Accelerating Spiking Neural Networks via Product Sparsity. It contains the cycle-accurate simulator for Prosperity architecture and implementation of several baseline accelerators.
 
 ## TL;DR
 We propose a Spiking Neural Networks (SNNs) accelerator, **Prosperity**, that leverage a novel **product sparsity** paradigm to improve various SNNs efficiency.
@@ -70,7 +70,7 @@ Notice that this script does not include power and area stats, since it is evalu
 
 
 ```bash
-sh run_DSE.sh
+./run_DSE.sh
 ```
 
 ### Run Sparsity Analysis (Figure 11) (7 minutes)
