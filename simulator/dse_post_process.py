@@ -45,7 +45,7 @@ def add_geometric_mean(df_dse):
 
 if __name__ == '__main__':
     
-    folder_name = '../dse_test'
+    folder_name = '../des_test'
     tile_size_M_list = [32, 64, 128, 256, 512, 1024, 2048]
     tile_size_K = 16
 
@@ -67,6 +67,15 @@ if __name__ == '__main__':
     # concat with bit sparsity
     df_all_density = pd.concat([df_all_density, df_bit_sparsity_density])
     df_all_density = add_geometric_mean(df_all_density)
+
+    # concat time with density, with a empty row in between
+    # construct a row with all -1.0
+    delimiter = pd.DataFrame([['delimiter'] + ['-1.0'] * (len(df_all_time.columns) - 1)], columns=df_all_time.columns)
+    df_all = pd.concat([df_all_time, delimiter], axis=0)
+    df_all = pd.concat([df_all, df_all_density], axis=0)
+
+    # save data
+    df_all.to_csv(os.path.join(folder_name, 'M_dse.csv'), index=False)
 
 
     # save data
@@ -90,8 +99,13 @@ if __name__ == '__main__':
     # save data
     df_all_density.to_csv(os.path.join(folder_name, 'density_dse_K.csv'), index=False)
     
+    # concat time with density, with a empty row in between
+    delimiter = pd.DataFrame([['delimiter'] + ['-1.0'] * (len(df_all_time.columns) - 1)], columns=df_all_time.columns)
+    df_all = pd.concat([df_all_time, delimiter], axis=0)
+    df_all = pd.concat([df_all, df_all_density], axis=0)
 
-
+    # save data
+    df_all.to_csv(os.path.join(folder_name, 'K_dse.csv'), index=False)
 
 
 
