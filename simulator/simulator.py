@@ -797,7 +797,7 @@ def find_product_sparsity(act: torch.Tensor):
                     
 if __name__ == '__main__':
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
     parser = argparse.ArgumentParser(description='Simulator')
     parser.add_argument('--type', type=str, default='Prosperity', help='type of accelerator')
