@@ -56,6 +56,8 @@ cd simulator
 ./run_simulator_all.sh
 ```
 
+If the script is not executable, try ``chmod -x run_simulator_all.sh`` to grant execute permission.
+
 This script will run the simulation of Prosperity and baselines on all of the models and datasets shown in Figure 8 in the paper. 
 It is expected to take 15 minutes to finish with CUDA.
 It will output the end to end runtime and energy consumption of each accelerator and on each dataset.
