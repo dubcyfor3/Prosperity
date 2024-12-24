@@ -89,7 +89,7 @@ Notice that the output file does not contain the density stats for FS neuron sin
 ### Run Buffer Area Evaluation (Figure 10 buffer area stats) (1 second)
 
 ```bash
-python cacti.py
+python buffer_cacti.py
 ```
 
 This program call the CACTI to evaluate the buffer area of Prosperity. 
