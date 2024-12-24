@@ -77,7 +77,7 @@ Notice that this script does not include power and area stats, since it is evalu
 ### Run Sparsity Analysis (Figure 11) (7 minutes)
 
 ```bash
-python simulator.py --type Prospeity --sparse_analysis_mode --use_cuda
+python simulator.py --type Prosperity --sparse_analysis_mode --use_cuda
 ```
 
 The script record the bit density and product density of Prosperity on all the models and datasets in Figure 11 in the paper.
@@ -91,12 +91,4 @@ python cacti.py
 ```
 
 This program call the CACTI to evaluate the buffer area of Prosperity. 
-The output area should be identical to the value in left pie chart in Figure 10 in the paper.
-
-<!-- ### ProSparsity Visualization
-
-```bash
-python sparse_analysis.py
-```
-
-To visualize the benefit of ProSparsity, this program discover product sparsity on a layer in spikformer model and visualize the submatrix of activation in bit sparsity and product sparsity. -->
+The output area should be identical to the buffer area value in left pie chart in Figure 10 in the paper.
