@@ -908,10 +908,14 @@ if __name__ == '__main__':
         spike_info_path = "../data/" + name + ".pkl"
         nn = create_network(model_name, spike_info_path)
 
+        if args.type == 'LoAS':
+            print(name)
         sim = Simulator(accelerator=accelerator, network=nn, benchmark_name=name, use_cuda=args.use_cuda)
         stats = sim.sim()
         stats_list.append(stats)
 
+        if args.type == 'LoAS':
+            continue
         if not dse_mode and not args.sparse_analysis_mode:
             energy = get_total_energy(stats, args.type.split('_')[0], name)
             print(f"total energy: {energy}")

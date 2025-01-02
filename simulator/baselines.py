@@ -65,16 +65,19 @@ def run_simulation_LoAS(network):
     stats = Stats()
     original_pseudo_acc = 0
     prosparsity_pseudo_acc = 0
+    dense_acc = 0
     for operator in network:
         if isinstance(operator, Conv2D) or isinstance(operator, FC):
-            ori_acc, prosparsity_acc = run_LoAS_convfc(operator)
+            ori_acc, prosparsity_acc, dense_acc = run_LoAS_convfc(operator)
     
             original_pseudo_acc += ori_acc
             prosparsity_pseudo_acc += prosparsity_acc
 
-    print("original pseudo acc: ", original_pseudo_acc)
-    print("prosparsity pseudo acc: ", prosparsity_pseudo_acc)
-    print("acc reduction: ", prosparsity_pseudo_acc / original_pseudo_acc)
+    bit_density = original_pseudo_acc / dense_acc
+    product_density = prosparsity_pseudo_acc / dense_acc
+    print("bit_density: ", bit_density)
+    print("product_density: ", product_density)
+    print("density improvement ratio: ", bit_density / product_density)
     return stats
 
 def run_simulation_PTB(network):
@@ -134,12 +137,13 @@ def run_LoAS_convfc(operator: Union[FC, Conv2D]):
     input_tensor = input_tensor.permute(1, 0, 2).contiguous()
     input_tensor = input_tensor.reshape(-1, eq_fc.input_dim)
 
-    prosparsity_act, prefix = prosparsity_engine.find_product_sparsity(input_tensor)
+    prosparsity_act, prefix = prosparsity_engine.find_product_sparsity(input_tensor, 256, 16)
 
     original_pseudo_acc = torch.sum(input_tensor).item() * eq_fc.output_dim
     prosparsity_pseudo_acc = torch.sum(prosparsity_act).item() * eq_fc.output_dim
+    dense_acc = input_tensor.shape[0] * input_tensor.shape[1] * eq_fc.output_dim
 
-    return original_pseudo_acc, prosparsity_pseudo_acc
+    return original_pseudo_acc, prosparsity_pseudo_acc, dense_acc
 
 
 def run_MINT_convfc(operator: Union[FC, Conv2D]):
