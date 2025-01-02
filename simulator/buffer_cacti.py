@@ -167,9 +167,31 @@ if __name__ == "__main__":
     wgt_buffer_area = get_buffer_area(tech_node, wgt_buffer_config['buffer_size'], wgt_buffer_config['block_size'])
     out_buffer_0_area = get_buffer_area(tech_node, out_buffer_0_config['buffer_size'], out_buffer_1_config['block_size'])
     out_buffer_1_area = get_buffer_area(tech_node, out_buffer_1_config['buffer_size'], out_buffer_1_config['block_size'])
-    print('Act buffer area: {} mm^2'.format(act_buffer_area))
-    print('Wgt buffer area: {} mm^2'.format(wgt_buffer_area))
-    print('Out buffer area: {} mm^2'.format(out_buffer_0_area + out_buffer_1_area))
+    act_buffer_power_static = get_buffer_power_energy(tech_node, act_buffer_config['buffer_size'], act_buffer_config['block_size'])
+    wgt_buffer_power_static = get_buffer_power_energy(tech_node, wgt_buffer_config['buffer_size'], wgt_buffer_config['block_size'])
+    out_buffer_0_power_static = get_buffer_power_energy(tech_node, out_buffer_0_config['buffer_size'], out_buffer_1_config['block_size'])
+    out_buffer_1_power_static = get_buffer_power_energy(tech_node, out_buffer_1_config['buffer_size'], out_buffer_1_config['block_size'])
+    buffer_access_energy_per_bit = (act_buffer_power_static[1] / (act_buffer_config['block_size'] * 8)+ 
+                                    wgt_buffer_power_static[1] / (wgt_buffer_config['block_size'] * 8) +
+                                    out_buffer_0_power_static[1] / (out_buffer_0_config['block_size'] * 8) + 
+                                    out_buffer_1_power_static[1] / (out_buffer_1_config['block_size'] * 8) + 
+                                    act_buffer_power_static[2] / (act_buffer_config['block_size'] * 8) +
+                                    wgt_buffer_power_static[2] / (wgt_buffer_config['block_size'] * 8) +
+                                    out_buffer_0_power_static[2] / (out_buffer_0_config['block_size'] * 8) + 
+                                    out_buffer_1_power_static[2] / (out_buffer_1_config['block_size'] * 8)) / 8
+    
+    buffer_access_per_cycle = 128 + 256 # an estimated value
+
+    dram_enenrgy_per_bit = 12.45 # pJ, derived from DRAMsim3
+    dram_access = 140574720 # stats derived on spikformer cifar10
+    time = 0.00374337 # stats derived on spikformer cifar10
 
     total_buffer_area = act_buffer_area + wgt_buffer_area + out_buffer_0_area + out_buffer_1_area
+    total_buffer_static_power = act_buffer_power_static[0] + wgt_buffer_power_static[0] + out_buffer_0_power_static[0] + out_buffer_1_power_static[0]
+    total_buffer_dynamic_power = buffer_access_per_cycle * buffer_access_energy_per_bit * 500 * 1000 * 1000 / 1e6
+    dram_power = dram_enenrgy_per_bit * dram_access * 1e-9 / time
     print('Prosperity total buffer area: {} mm^2'.format(total_buffer_area))
+    print('Prosperity total buffer static power: {} mW'.format(total_buffer_static_power))
+    print('Prosperity total buffer dynamic power: {} mW'.format(total_buffer_dynamic_power))
+    print('Prosperity total buffer power: {} mW'.format(total_buffer_static_power + total_buffer_dynamic_power))
+    print('Prosperity total DRAM power: {} mW'.format(dram_power))
