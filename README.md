@@ -100,3 +100,35 @@ python buffer_cacti.py
 
 This program call the CACTI to evaluate the buffer area of Prosperity. 
 The output area should be identical to the buffer area value in left pie chart in Figure 10 in the paper.
+
+### Run Prosperity Ablation Study (Figure 9) (to be completed)
+
+- Black pillar: Eyeriss with 128 PE, scale the time result of following ablation study by 128/168 to get the result used in Figure 9.
+```bash
+python simulator.py --type Eyeriss
+```
+
+- For the orange, green, and blue pillars
+
+```bash
+python simulator.py --type PTB
+python simulator.py --type Prosperity --bit_sparsity
+python simulator.py --type Prosperity --use_cuda
+```
+
+- For the purple pillar, the simulation method will be released soon.
+
+### Applying ProSparsity to LoAS (Table 5) (to be completed)
+
+Our proposed ProSparsity can be applied to other SNN accelerators. We provide an example of applying ProSparsity to LoAS.
+
+```bash
+python simulator.py --type LoAS
+```
+
+This script does not use the input activation data used in table 5, but instead use the default activation data in `data` folder. The data used in table 5 will be released soon.
+
+
+## Contributing
+
+Welcome to use the code or contribute to the project!
