@@ -213,7 +213,6 @@ class Simulator:
         if tile_size_M * tile_size_K > 32768:
             raise Exception("tile size is too large for shared memory")
         prosparsity_act, prefix_array = prosparsity_engine.find_product_sparsity(input_act, tile_size_M, tile_size_K)
-
         kernel_size = extract_kernel_size(operator.name)
 
         stats.reads['dram'] =  K * N * operator.weight_tensor.nbits * tile_num_M
@@ -241,8 +240,28 @@ class Simulator:
         all_zero_row = nnz_each_row == 0
 
         compute_cycles = (torch.sum(prosparsity_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()) * tile_num_N
-        preprocess_cycles = get_prosparsity_cycles(input_act) + M // self.accelerator.num_popcnt
+        preprocess_cycles = (get_prosparsity_cycles(input_act) + M // self.accelerator.num_popcnt) * tile_num_N
 
+        if self.accelerator.issue_type == 1:
+            compute_cycles = 0
+            for i in range(prefix_array.shape[0]):
+                for j in range(prefix_array.shape[1]):
+                    cur_start_row = i * prefix_array.shape[0] * tile_size_M
+                    cur_end_row = min((i + 1) * prefix_array.shape[0] * tile_size_M, M)
+                    cur_prosparsity_act = prosparsity_act[cur_start_row: cur_end_row, :]
+                    cur_input_act = input_act[cur_start_row: cur_end_row, :]
+                    all_zero_row = torch.sum(cur_prosparsity_act != 0, dim=-1) == 0
+                    all_zero_row_ori = torch.sum(cur_input_act != 0, dim=-1) == 0
+                    cur_compute_cycles = (torch.sum(cur_prosparsity_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()) * tile_num_N
+                    cur_prefix = prefix_array[i, j, :]
+                    cur_forest = construct_prosparsity_forest(cur_prefix)
+                    depth = nx.dag_longest_path_length(cur_forest)
+                    cur_issue_cycles = depth // 4 * tile_size_M * tile_num_N
+                    compute_cycles += max(cur_issue_cycles, cur_compute_cycles)
+        elif self.accelerator.issue_type == 2:
+            pass
+        else:
+            raise Exception("unsupported issue type")
 
         init_mem_access = 0
         if not weight_stored_in_buffer:
@@ -375,9 +394,14 @@ class Simulator:
                         nnz_each_row_ori = torch.sum(cur_act != 0, dim=-1)
                         all_zero_row = nnz_each_row == 0
                         all_zero_row_ori = nnz_each_row_ori == 0
-                        issue_cycles = 0
-                        this_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
-                        compute_cycles += max(this_compute_cycles, issue_cycles)
+                        if self.accelerator.issue_type == 1:
+                            forest = construct_prosparsity_forest(prefix_array)
+                            depth = nx.dag_longest_path_length(forest)
+                            cur_issue_cycles = depth // 4 * cur_tile_size_M
+                        else:
+                            cur_issue_cycles = 0
+                        cur_compute_cycles = torch.sum(preprocess_act != 0).item() + torch.sum(all_zero_row).item() - torch.sum(all_zero_row_ori).item()
+                        compute_cycles += max(cur_issue_cycles, cur_compute_cycles)
 
 
                         num_all_zero_row.append(torch.sum(all_zero_row_ori).item())
@@ -702,6 +726,13 @@ def verify_product_sparsity(act_pro: torch.Tensor, act_bit: torch.Tensor, tree: 
     assert torch.all(act_pro == act_bit)
     return True
     
+def construct_prosparsity_forest(prefix_array: torch.Tensor):
+    forest = nx.DiGraph()
+    for i in range(prefix_array.shape[0]):
+        if prefix_array[i].item() == -1:
+            continue
+        forest.add_edge(prefix_array[i].item(), i)
+    return forest
 
 def find_rank_two_product_sparsity(act: torch.Tensor):
     preprocessed_act = act.clone()
@@ -811,6 +842,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_cuda', action='store_true', default=False, help='use cuda')
     parser.add_argument('--dse_mode', action='store_true', default=False, help='design space exploration mode')
     parser.add_argument('--sparse_analysis_mode', action='store_true', default=False, help='analyze the ProSparity and BitSparsity in extra models')
+    parser.add_argument('--issue_type', type=int, default=2, help='Prosperity issue type (1 or 2)')
 
     args = parser.parse_args()
 
@@ -823,7 +855,7 @@ if __name__ == '__main__':
                               tile_size_M=args.tile_size_M, 
                               tile_size_K=args.tile_size_K,
                               product_sparsity=not args.bit_sparsity,
-                              tree_manage_type=1,
+                              issue_type=args.issue_type,
                               dense=args.dense,
                               )
     

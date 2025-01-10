@@ -1,5 +1,5 @@
 class Accelerator:
-    def __init__(self, type, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, product_sparsity=True, dense=False, tree_manage_type=2, mem_if_width=1024):
+    def __init__(self, type, adder_array_size, LIF_array_size, tile_size_M, tile_size_K, product_sparsity=True, dense=False, issue_type=2, mem_if_width=1024):
         self.type = type
         self.num_popcnt = 8
         self.adder_array_size = adder_array_size  # tile size N
@@ -18,6 +18,6 @@ class Accelerator:
 
         self.product_sparsity = product_sparsity
         self.dense = dense
-        self.tree_manage_type = tree_manage_type # 1: search tree through prefix 2: sorting based tree
+        self.issue_type = issue_type # 1: search over tree through prefix 2: sorting based issue
 
 
