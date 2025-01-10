@@ -98,25 +98,25 @@ Notice that the output file does not contain the density stats for FS neuron sin
 python buffer_cacti.py
 ```
 
-This program call the CACTI to evaluate the buffer area of Prosperity. 
-The output area should be identical to the buffer area value in left pie chart in Figure 10 in the paper.
+This program call the CACTI to evaluate the buffer power, area of Prosperity. It also evaluate the power of DRAM.
+The output result should be identical to the buffer area value in left pie chart in Figure 10 in the paper.
 
-### Run Prosperity Ablation Study (Figure 9) (to be completed)
+### Run Prosperity Ablation Study (Figure 9)
 
 - Black pillar: Eyeriss with 128 PE, scale the time result of following ablation study by 128/168 to get the result used in Figure 9.
 ```bash
 python simulator.py --type Eyeriss
 ```
 
-- For the orange, green, and blue pillars
+- For the orange, green, purple, and blue pillars
 
 ```bash
 python simulator.py --type PTB
 python simulator.py --type Prosperity --bit_sparsity
+python simulator.py --type Prosperity --issue_type 1 --use_cuda
 python simulator.py --type Prosperity --use_cuda
 ```
 
-- For the purple pillar, the simulation method will be released soon.
 
 ### Applying ProSparsity to LoAS (Table 5) (to be completed)
 
