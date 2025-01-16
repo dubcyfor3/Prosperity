@@ -118,15 +118,13 @@ python simulator.py --type Prosperity --use_cuda
 ```
 
 
-### Applying ProSparsity to LoAS (Table 5) (to be completed)
+### Applying ProSparsity to LoAS
 
 Our proposed ProSparsity can be applied to other SNN accelerators. We provide an example of applying ProSparsity to LoAS.
 
 ```bash
 python simulator.py --type LoAS
 ```
-
-This script does not use the input activation data used in table 5, but instead use the default activation data in `data` folder. The data used in table 5 will be released soon.
 
 
 ## Contributing
