@@ -124,6 +124,18 @@ Our proposed ProSparsity can be applied to other SNN accelerators. We provide an
 python simulator.py --type LoAS
 ```
 
+## Citation
+If you find Prosperity helpful in your project or research, please consider citing our [paper](https://arxiv.org/abs/2503.03379):
+```
+@inproceedings{wei2025prosperity,
+  title={Prosperity: Accelerating Spiking Neural Networks via Product Sparsity},
+  author={Wei, Chiyue and Guo, Cong and Cheng, Feng and Li, Shiyu and Yang, Hao Frank and Li, Hai Helen and Chen, Yiran},
+  booktitle={2025 IEEE International Symposium on High Performance Computer Architecture (HPCA)},
+  pages={806--820},
+  year={2025},
+  organization={IEEE}
+}
+```
 
 ## Contributing
 
